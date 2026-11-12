@@ -10,7 +10,7 @@ use fem_solver::{
 };
 
 use crate::camera::Camera2d;
-use crate::picking::pick_node;
+use crate::picking::{pick_node, pick_nodes_in_rect};
 use crate::renderer::{RenderData, ViewportCallback, ViewportGpu, build_render_data};
 
 fn plane_model_label(model: PlaneModel) -> &'static str {
@@ -29,6 +29,8 @@ pub struct FemApp {
     bc: BoundaryConditions,
     result: Option<SolveResult>,
     selection: BTreeSet<NodeId>,
+    box_select_origin: Option<egui::Pos2>,
+    box_select_current: Option<egui::Pos2>,
     camera: Camera2d,
     needs_fit: bool,
     show_deformed: bool,
@@ -64,6 +66,8 @@ impl FemApp {
             bc: BoundaryConditions::default(),
             result: None,
             selection: BTreeSet::new(),
+            box_select_origin: None,
+            box_select_current: None,
             camera: Camera2d::default(),
             needs_fit: true,
             show_deformed: true,
@@ -275,6 +279,19 @@ impl FemApp {
         self.needs_fit = true;
     }
 
+    fn apply_box_selection(&mut self, rect: egui::Rect, viewport: egui::Rect, add: bool) {
+        let Some(mesh) = self.mesh.as_ref() else {
+            return;
+        };
+        let hits = pick_nodes_in_rect(mesh, &self.camera, viewport, rect);
+        if !add {
+            self.selection.clear();
+        }
+        self.selection.extend(hits);
+        self.sync_editor_from_selection();
+        self.mark_dirty();
+    }
+
     fn side_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("模型");
         ui.horizontal(|ui| {
@@ -368,7 +385,7 @@ impl FemApp {
         ui.heading("节点边界条件");
         let selected_nodes: Vec<NodeId> = self.selection.iter().copied().collect();
         if selected_nodes.is_empty() {
-            ui.label("在视口中点击节点；Shift/Ctrl 可多选。");
+            ui.label("在视口中点击节点或拖拽框选；Shift/Ctrl 可追加选择。");
         } else {
             let preview = selected_nodes
                 .iter()
@@ -502,10 +519,29 @@ impl FemApp {
             }
         }
 
+        let toggle = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl || i.modifiers.command);
+
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            let origin = ui.input(|i| i.pointer.press_origin());
+            self.box_select_origin = origin;
+            self.box_select_current = origin.or_else(|| response.interact_pointer_pos());
+        }
+        if response.dragged_by(egui::PointerButton::Primary)
+            && let Some(cursor) = response.interact_pointer_pos()
+        {
+            self.box_select_current = Some(cursor);
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            let origin = self.box_select_origin.take();
+            let end = self.box_select_current.take();
+            if let (Some(origin), Some(end)) = (origin, end) {
+                self.apply_box_selection(egui::Rect::from_two_pos(origin, end), rect, toggle);
+            }
+        }
+
         if response.clicked()
             && let Some(cursor) = response.interact_pointer_pos()
         {
-            let toggle = ui.input(|i| i.modifiers.shift || i.modifiers.ctrl || i.modifiers.command);
             let hit = self
                 .mesh
                 .as_ref()
@@ -546,10 +582,25 @@ impl FemApp {
         ui.painter()
             .add(egui_wgpu::Callback::new_paint_callback(rect, callback));
 
+        if response.dragged_by(egui::PointerButton::Primary)
+            && let (Some(origin), Some(current)) = (self.box_select_origin, self.box_select_current)
+        {
+            let selection_rect = egui::Rect::from_two_pos(origin, current).intersect(rect);
+            if selection_rect.is_positive() {
+                ui.painter().rect(
+                    selection_rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(80, 140, 255, 28),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 175, 255)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+
         ui.painter().text(
             rect.left_top() + egui::vec2(12.0, 10.0),
             egui::Align2::LEFT_TOP,
-            "左键选择节点 · 中键/右键拖拽平移 · 滚轮缩放",
+            "左键点击/拖拽框选节点 · Shift/Ctrl 追加 · 中键/右键平移 · 滚轮缩放",
             egui::FontId::proportional(12.0),
             egui::Color32::from_gray(120),
         );
