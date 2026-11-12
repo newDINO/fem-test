@@ -8,15 +8,6 @@ pub enum PlaneModel {
     PlaneStrain,
 }
 
-impl PlaneModel {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::PlaneStress => "平面应力",
-            Self::PlaneStrain => "平面应变",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct Material {
     /// Young's modulus. The number is unitless; the user must keep it

@@ -13,6 +13,13 @@ use crate::camera::Camera2d;
 use crate::picking::pick_node;
 use crate::renderer::{RenderData, ViewportCallback, ViewportGpu, build_render_data};
 
+fn plane_model_label(model: PlaneModel) -> &'static str {
+    match model {
+        PlaneModel::PlaneStress => "平面应力",
+        PlaneModel::PlaneStrain => "平面应变",
+    }
+}
+
 pub struct FemApp {
     path_input: String,
     drop_axis: DropAxis,
@@ -335,10 +342,11 @@ impl FemApp {
         });
         let mut model = self.material.model;
         egui::ComboBox::from_id_salt("plane_model")
-            .selected_text(model.label())
+            .selected_text(plane_model_label(model))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut model, PlaneModel::PlaneStress, "平面应力");
-                ui.selectable_value(&mut model, PlaneModel::PlaneStrain, "平面应变");
+                for option in [PlaneModel::PlaneStress, PlaneModel::PlaneStrain] {
+                    ui.selectable_value(&mut model, option, plane_model_label(option));
+                }
             });
         if model != self.material.model {
             self.material.model = model;
