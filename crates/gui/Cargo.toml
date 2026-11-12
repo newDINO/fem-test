@@ -8,6 +8,9 @@ name = "fem-gui"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "system_fonts", "wgpu", "x11", "wayland"] }
 fem-solver = { path = "../solver" }
 bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+egui_system_font_provider = "0.37"

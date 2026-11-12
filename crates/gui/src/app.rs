@@ -41,8 +41,6 @@ pub struct FemApp {
 
 impl FemApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        crate::fonts::install_cjk_font(&cc.egui_ctx);
-
         let render_state = cc
             .wgpu_render_state
             .as_ref()

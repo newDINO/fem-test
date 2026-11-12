@@ -90,7 +90,7 @@ assets/plate.stl           # 示例平面网格
 
 渲染没有使用 `egui::Mesh` 画三角形，而是通过 `egui_wgpu::CallbackTrait` 在 eframe 共享的 wgpu 设备上绘制自己的三角形/线段管线。三角形填充和线段（网格边、节点标记、约束、力箭头）各有一条管线。
 
-中文字体说明：egui 内置字体不含中日韩字形。程序启动时会在常见系统路径中寻找 Noto Sans CJK、微软雅黑、苹方等字体，并作为回退字体注册；找不到时会打印提示，可用环境变量 `FEM_CJK_FONT=/path/to/font.ttf` 指定。
+中文字体说明：egui 内置字体不含中日韩字形。`eframe` 启用了 `system_fonts` feature，运行时会通过操作系统的字体枚举（fontconfig / DirectWrite / CoreText）按字符和 locale 按需加载系统中文字体作为回退；字体文件以内存映射方式读取，不会打包进程序。若系统本身没有安装中文字体（或 Linux 上缺少可用的 fontconfig 配置），中文会显示为占位方框。
 
 ## STL 导入约束
 
@@ -141,7 +141,7 @@ cargo clippy --all-targets
 - 非平面 STL 拒绝；
 - 自带示例 `assets/plate.stl` 的加载与悬臂求解。
 
-GUI 另有一个 wgpu 管线冒烟测试：在存在可用适配器时创建 shader 与两条渲染管线，验证 WGSL 和管线描述符；没有 GPU 适配器的环境会自动跳过。
+GUI 另有两个冒烟测试：在存在可用适配器时创建 shader 与两条渲染管线，验证 WGSL 和管线描述符；以及通过 `SystemFontProvider` 查询中文字形，验证系统字体回退。没有 GPU 适配器或未安装中文字体的环境会自动跳过。
 
 ## 依赖
 
@@ -151,7 +151,7 @@ GUI 另有一个 wgpu 管线冒烟测试：在存在可用适配器时创建 sha
 | `nalgebra` | 固定尺寸小矩阵 |
 | `stl_io` | STL 读写 |
 | `thiserror` | 错误类型 |
-| `eframe` / `egui` | 窗口与 UI（wgpu 后端） |
+| `eframe` / `egui` | 窗口与 UI（wgpu 后端；启用 `system_fonts` 处理中文回退） |
 | `bytemuck` | 顶点/Uniform 字节转换 |
 
 依赖保持在必要范围内，没有引入额外的网格库、颜色库或图片库。

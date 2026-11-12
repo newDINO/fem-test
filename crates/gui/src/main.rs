@@ -1,6 +1,5 @@
 mod app;
 mod camera;
-mod fonts;
 mod picking;
 mod renderer;
 
@@ -14,6 +13,9 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([900.0, 600.0])
             .with_title("FEM 2D Prototype"),
         renderer: eframe::Renderer::Wgpu,
+        // Load system fonts on demand for glyphs egui's default fonts lack
+        // (e.g. Chinese labels). This is the default, kept explicit here.
+        system_font_fallback: true,
         ..Default::default()
     };
 
