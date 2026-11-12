@@ -71,3 +71,53 @@ impl Camera2d {
         self.center[1] += before[1] - after[1];
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn viewport() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0))
+    }
+
+    #[test]
+    fn world_positive_y_maps_to_screen_up() {
+        let camera = Camera2d {
+            center: [0.0, 0.0],
+            scale: 10.0,
+        };
+        let above = camera.world_to_screen([0.0, 1.0], viewport());
+        let below = camera.world_to_screen([0.0, -1.0], viewport());
+        assert!((above.y - 40.0).abs() < 1e-6);
+        assert!((below.y - 60.0).abs() < 1e-6);
+        assert!(above.y < below.y);
+    }
+
+    #[test]
+    fn pan_moves_the_scene_with_the_pointer() {
+        let mut camera = Camera2d {
+            center: [0.0, 0.0],
+            scale: 10.0,
+        };
+        let before = camera.world_to_screen([0.0, 0.0], viewport());
+        let drag = egui::vec2(5.0, 7.0);
+        camera.pan(drag);
+        let after = camera.world_to_screen([0.0, 0.0], viewport());
+        assert!((after.x - before.x - drag.x).abs() < 1e-4);
+        assert!((after.y - before.y - drag.y).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zoom_keeps_the_world_point_under_the_cursor() {
+        let mut camera = Camera2d {
+            center: [1.0, 2.0],
+            scale: 10.0,
+        };
+        let cursor = egui::pos2(123.0, 45.0);
+        let before = camera.screen_to_world(cursor, viewport());
+        camera.zoom_at(1.7, cursor, viewport());
+        let after = camera.screen_to_world(cursor, viewport());
+        assert!((after[0] - before[0]).abs() < 1e-9);
+        assert!((after[1] - before[1]).abs() < 1e-9);
+    }
+}

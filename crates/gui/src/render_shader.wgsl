@@ -21,8 +21,10 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     let relative = in.position.xy - uniforms.center;
-    let screen = vec2<f32>(relative.x * uniforms.scale, -relative.y * uniforms.scale);
-    let ndc = screen / (uniforms.viewport * 0.5);
+    // Clip space has +Y up. egui screen coordinates have +Y down, so the
+    // flip lives only in `Camera2d::world_to_screen`; doing it here as well
+    // would mirror the mesh relative to picking and panning.
+    let ndc = (relative * uniforms.scale) / (uniforms.viewport * 0.5);
 
     var out: VertexOutput;
     out.clip_position = vec4<f32>(ndc, 0.0, 1.0);

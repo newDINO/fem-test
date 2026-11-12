@@ -418,7 +418,7 @@ impl ViewportGpu {
         self.line_count = data.lines.len() as u32;
     }
 
-    fn draw(&self, pass: &mut wgpu::RenderPass<'static>) {
+    fn draw<'a>(&self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_bind_group(0, &self.bind_group, &[]);
 
         if self.fill_count > 0 {
@@ -529,5 +529,167 @@ mod tests {
         drop(gpu);
         let error = block_on(scope.pop());
         assert!(error.is_none(), "pipeline validation error: {error:?}");
+    }
+
+    /// Render one triangle and read it back, to pin down the world-to-clip
+    /// mapping. A vertically mirrored viewport would swap the two samples.
+    #[test]
+    fn renders_world_positive_y_upwards() {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
+        let Ok(adapter) = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        })) else {
+            eprintln!("no wgpu adapter available; skipping orientation test");
+            return;
+        };
+        let Ok((device, queue)) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("fem-gui orientation test device"),
+            ..Default::default()
+        })) else {
+            eprintln!("could not create a wgpu device; skipping orientation test");
+            return;
+        };
+
+        const SIZE: u32 = 64;
+        const SCALE: f32 = 16.0;
+        const COLOR: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+        let mut gpu = ViewportGpu::new(&device, format);
+        gpu.upload(
+            &device,
+            &queue,
+            &RenderData {
+                fill: vec![
+                    Vertex {
+                        position: [-1.0, -1.0, 0.0],
+                        color: COLOR,
+                    },
+                    Vertex {
+                        position: [1.0, -1.0, 0.0],
+                        color: COLOR,
+                    },
+                    Vertex {
+                        position: [1.0, 1.0, 0.0],
+                        color: COLOR,
+                    },
+                ],
+                lines: Vec::new(),
+            },
+        );
+
+        let uniforms = Uniforms {
+            center: [0.0, 0.0],
+            scale: SCALE,
+            _pad0: 0.0,
+            viewport: [SIZE as f32, SIZE as f32],
+            _pad1: [0.0; 2],
+        };
+        queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("orientation test target"),
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("orientation test encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("orientation test pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            gpu.draw(&mut pass);
+        }
+
+        let bytes_per_row = SIZE * 4; // 256, already a multiple of COPY_BYTES_PER_ROW_ALIGNMENT.
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("orientation test readback"),
+            size: (bytes_per_row * SIZE) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(SIZE),
+                },
+            },
+            wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("device poll");
+        receiver.recv().expect("map callback").expect("buffer map");
+
+        let pixels = slice.get_mapped_range().expect("mapped range");
+        let pixel = |x: u32, y: u32| -> [u8; 4] {
+            let i = (y * bytes_per_row + x * 4) as usize;
+            [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+        };
+
+        // The triangle covers screen coordinates with x + y > 64, i.e. the
+        // upper-right half. World +Y must land near the top of the image.
+        let inside = pixel(36, 44);
+        let outside = pixel(30, 20);
+        assert!(
+            inside[0] > 180 && inside[1] < 80,
+            "expected a filled pixel at (36, 44), got {inside:?}"
+        );
+        assert!(
+            outside[0] < 80,
+            "expected background at (30, 20), got {outside:?}"
+        );
     }
 }
