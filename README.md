@@ -21,9 +21,13 @@
 - 单位完全由用户负责：界面不做任何单位换算，只要求 E、几何、厚度、力使用同一套一致单位。
 
 ## 快速开始
-
 ```bash
 # 需要 Rust 1.95+（eframe 0.37 的要求）
+cargo run -p fem-gui
+```
+默认的 `dev profile` 已经开启了O1优化。
+如果需要更多优化，可使用
+```bash
 cargo run -p fem-gui --release
 ```
 
