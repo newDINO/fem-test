@@ -1,4 +1,6 @@
 use std::collections::BTreeSet;
+use std::error::Error;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +101,71 @@ impl Mesh {
             .map(|(a, b)| [NodeId(a), NodeId(b)])
             .collect()
     }
+
+    /// Check topology and geometry: non-empty, finite coordinates, triangle
+    /// indices in range and non-degenerate elements.
+    ///
+    /// This is pure geometry, so it lives next to [`Mesh`] instead of in the
+    /// solver. Importers and the solver can share it without a different
+    /// validation path.
+    pub fn validate(&self) -> Result<(), MeshError> {
+        if self.nodes.is_empty() || self.triangles.is_empty() {
+            return Err(MeshError::Empty);
+        }
+
+        for node in &self.nodes {
+            if !node.position.iter().all(|value| value.is_finite()) {
+                return Err(MeshError::NonFiniteCoordinate);
+            }
+        }
+
+        let diagonal = self.bounds().map_or(1.0, Bounds2::diagonal).max(1e-12);
+        let area_tolerance = 1e-12 * diagonal * diagonal;
+
+        for (index, triangle) in self.triangles.iter().enumerate() {
+            if triangle.iter().any(|node| node.index() >= self.nodes.len()) {
+                return Err(MeshError::NodeIndexOutOfRange { triangle: index });
+            }
+            if triangle[0] == triangle[1]
+                || triangle[1] == triangle[2]
+                || triangle[2] == triangle[0]
+            {
+                return Err(MeshError::DegenerateTriangle { triangle: index });
+            }
+            let [a, b, c] = self.triangle_coords(*triangle);
+            if signed_area2(a, b, c).abs() <= area_tolerance {
+                return Err(MeshError::DegenerateTriangle { triangle: index });
+            }
+        }
+
+        Ok(())
+    }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MeshError {
+    Empty,
+    NonFiniteCoordinate,
+    NodeIndexOutOfRange { triangle: usize },
+    DegenerateTriangle { triangle: usize },
+}
+
+impl fmt::Display for MeshError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "mesh is empty"),
+            Self::NonFiniteCoordinate => write!(f, "mesh contains a non-finite coordinate"),
+            Self::NodeIndexOutOfRange { triangle } => {
+                write!(f, "triangle {triangle} references a node outside the mesh")
+            }
+            Self::DegenerateTriangle { triangle } => {
+                write!(f, "triangle {triangle} is degenerate or has repeated nodes")
+            }
+        }
+    }
+}
+
+impl Error for MeshError {}
 
 /// Signed area of a 2D triangle; positive means counter-clockwise.
 pub fn signed_area2(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {

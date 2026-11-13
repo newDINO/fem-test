@@ -4,8 +4,9 @@ use std::path::Path;
 
 use stl_io::IndexedMesh;
 
-use crate::error::FemError;
-use crate::mesh::{Mesh, MeshExt, Node, NodeId, signed_area2};
+use fem_types::{Mesh, Node, NodeId, signed_area2};
+
+use crate::ImportError;
 
 const ALIGNMENT_TOLERANCE: f64 = 0.999;
 const PROJECTED_AREA_TOLERANCE: f64 = 1e-12;
@@ -82,21 +83,21 @@ pub struct ImportReport {
 pub fn load_stl(
     path: impl AsRef<Path>,
     options: StlImportOptions,
-) -> Result<(Mesh, ImportReport), FemError> {
+) -> Result<(Mesh, ImportReport), ImportError> {
     let path = path.as_ref();
     let mut file = File::open(path)
-        .map_err(|e| FemError::Stl(format!("cannot open {}: {e}", path.display())))?;
+        .map_err(|e| ImportError::Stl(format!("cannot open {}: {e}", path.display())))?;
     let stl = stl_io::read_stl(&mut file)
-        .map_err(|e| FemError::Stl(format!("cannot parse {}: {e}", path.display())))?;
+        .map_err(|e| ImportError::Stl(format!("cannot parse {}: {e}", path.display())))?;
     import_stl_mesh(&stl, options)
 }
 
 pub fn import_stl_mesh(
     stl: &IndexedMesh,
     options: StlImportOptions,
-) -> Result<(Mesh, ImportReport), FemError> {
+) -> Result<(Mesh, ImportReport), ImportError> {
     if stl.faces.is_empty() || stl.vertices.is_empty() {
-        return Err(FemError::EmptyMesh);
+        return Err(ImportError::EmptyMesh);
     }
 
     let axis = options.drop_axis.index();
@@ -109,10 +110,9 @@ pub fn import_stl_mesh(
     for face in &stl.faces {
         let mut points = [[0.0f64; 3]; 3];
         for (k, index) in face.vertices.iter().enumerate() {
-            let vertex = stl
-                .vertices
-                .get(*index)
-                .ok_or_else(|| FemError::Stl("STL face references a missing vertex".to_owned()))?;
+            let vertex = stl.vertices.get(*index).ok_or_else(|| {
+                ImportError::Stl("STL face references a missing vertex".to_owned())
+            })?;
             points[k] = [vertex.0[0] as f64, vertex.0[1] as f64, vertex.0[2] as f64];
         }
         let [a, b, c] = points;
@@ -129,7 +129,7 @@ pub fn import_stl_mesh(
             continue;
         }
         if (normal[axis] / normal_len).abs() < ALIGNMENT_TOLERANCE {
-            return Err(FemError::NonPlanar(format!(
+            return Err(ImportError::NonPlanar(format!(
                 "a triangle normal is not parallel to the dropped {} axis; \
                  rotate the mesh so the plane is axis-aligned",
                 options.drop_axis.label()
@@ -149,7 +149,7 @@ pub fn import_stl_mesh(
     }
 
     if usable_faces == 0 {
-        return Err(FemError::EmptyMesh);
+        return Err(ImportError::EmptyMesh);
     }
 
     let in_plane_size = [
@@ -159,7 +159,7 @@ pub fn import_stl_mesh(
     let in_plane_diagonal =
         (in_plane_size[0] * in_plane_size[0] + in_plane_size[1] * in_plane_size[1]).sqrt();
     if !in_plane_diagonal.is_finite() || in_plane_diagonal <= 0.0 {
-        return Err(FemError::NonPlanar(
+        return Err(ImportError::NonPlanar(
             "the projected mesh has zero in-plane size".to_owned(),
         ));
     }
@@ -167,7 +167,7 @@ pub fn import_stl_mesh(
     let dropped_span = dropped_max - dropped_min;
     let planar_tolerance = (in_plane_diagonal * 1e-5).max(1e-9);
     if dropped_span > planar_tolerance {
-        return Err(FemError::NonPlanar(format!(
+        return Err(ImportError::NonPlanar(format!(
             "the mesh spans {dropped_span:.6e} along the dropped {} axis; \
              export a single planar surface or pick a different axis",
             options.drop_axis.label()
@@ -178,7 +178,7 @@ pub fn import_stl_mesh(
         .weld_tolerance
         .unwrap_or_else(|| (in_plane_diagonal * 1e-6).max(1e-9));
     if !weld_tolerance.is_finite() || weld_tolerance <= 0.0 {
-        return Err(FemError::InvalidInput(
+        return Err(ImportError::InvalidInput(
             "weld tolerance must be finite and greater than zero".to_owned(),
         ));
     }
@@ -197,7 +197,7 @@ pub fn import_stl_mesh(
         let mut valid = true;
         for (k, index) in face.vertices.iter().enumerate() {
             let Some(vertex) = stl.vertices.get(*index) else {
-                return Err(FemError::Stl(
+                return Err(ImportError::Stl(
                     "STL face references a missing vertex".to_owned(),
                 ));
             };
@@ -249,7 +249,7 @@ pub fn import_stl_mesh(
                 Some(id) => id,
                 None => {
                     if nodes.len() > u32::MAX as usize {
-                        return Err(FemError::Stl(
+                        return Err(ImportError::Stl(
                             "too many vertices for a 32-bit node index".to_owned(),
                         ));
                     }
@@ -283,7 +283,7 @@ pub fn import_stl_mesh(
     }
 
     if triangles.is_empty() {
-        return Err(FemError::EmptyMesh);
+        return Err(ImportError::EmptyMesh);
     }
 
     let mesh = Mesh { nodes, triangles };
@@ -305,11 +305,11 @@ pub fn import_stl_mesh(
     Ok((mesh, report))
 }
 
-fn weld_key(p: [f64; 2], tolerance: f64) -> Result<(i64, i64), FemError> {
-    fn quantize(value: f64, tolerance: f64) -> Result<i64, FemError> {
+fn weld_key(p: [f64; 2], tolerance: f64) -> Result<(i64, i64), ImportError> {
+    fn quantize(value: f64, tolerance: f64) -> Result<i64, ImportError> {
         let q = (value / tolerance).round();
         if !q.is_finite() || q < i64::MIN as f64 || q > i64::MAX as f64 {
-            return Err(FemError::InvalidInput(
+            return Err(ImportError::InvalidInput(
                 "coordinate is too large for the weld tolerance".to_owned(),
             ));
         }

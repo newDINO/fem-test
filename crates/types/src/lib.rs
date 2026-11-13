@@ -16,6 +16,6 @@ pub mod result;
 pub mod format;
 
 pub use material::{IsotropicMaterial, Material, MaterialId};
-pub use mesh::{Bounds2, ElemId, Mesh, Node, NodeId, signed_area2};
+pub use mesh::{Bounds2, ElemId, Mesh, MeshError, Node, NodeId, signed_area2};
 pub use model::{MaterialAssignment, MaterialAssignmentError, Model, PlaneModel};
 pub use result::{ElementStress, SolveResult, von_mises_stress};

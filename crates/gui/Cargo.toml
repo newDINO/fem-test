@@ -16,6 +16,7 @@ eframe = { version = "0.37", default-features = false, features = [
     "wayland",
     "clipboard",
 ] }
+fem-import = { path = "../import" }
 fem-solver = { path = "../solver" }
 fem-types = { path = "../types" }
 bytemuck = { version = "1", features = ["derive"] }

@@ -819,9 +819,19 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "eframe",
+ "fem-import",
  "fem-solver",
  "fem-types",
  "rfd",
+]
+
+[[package]]
+name = "fem-import"
+version = "0.1.0"
+dependencies = [
+ "fem-types",
+ "stl_io",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -829,9 +839,9 @@ name = "fem-solver"
 version = "0.1.0"
 dependencies = [
  "faer",
+ "fem-import",
  "fem-types",
  "nalgebra",
- "stl_io",
  "thiserror 2.0.21",
 ]
 

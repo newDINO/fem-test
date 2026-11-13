@@ -2,6 +2,7 @@ use nalgebra::{Matrix3, SMatrix, SVector};
 
 use crate::error::FemError;
 use crate::material::{Material, MaterialExt, PlaneModel};
+use crate::mesh::MeshError;
 
 pub type BMatrix = SMatrix<f64, 3, 6>;
 pub type KMatrix = SMatrix<f64, 6, 6>;
@@ -28,7 +29,10 @@ impl Tri3Kernel {
         let two_area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
 
         if !two_area.is_finite() || two_area.abs() <= f64::EPSILON {
-            return Err(FemError::DegenerateElement(element_index));
+            return Err(MeshError::DegenerateTriangle {
+                triangle: element_index,
+            }
+            .into());
         }
 
         // Keep the node order used by the mesh. Using the signed area here

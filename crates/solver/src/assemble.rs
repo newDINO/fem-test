@@ -5,7 +5,7 @@ use crate::dof::DofMap;
 use crate::element::Tri3Kernel;
 use crate::error::FemError;
 use crate::material::MaterialExt;
-use crate::mesh::{ElemId, MeshExt};
+use crate::mesh::ElemId;
 
 pub struct Assembly {
     pub dof_map: DofMap,

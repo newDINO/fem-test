@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use eframe::egui;
 use eframe::egui_wgpu;
+use fem_import::{DropAxis, ImportReport, StlImportOptions, load_stl};
 use fem_solver::{
-    BoundaryConditions, DropAxis, ImportReport, Material, MaterialAssignment, MaterialExt,
-    MaterialId, Mesh, MeshExt, Model, NodeId, PlaneModel, SolveResult, StlImportOptions, load_stl,
-    solve,
+    BoundaryConditions, Material, MaterialAssignment, MaterialExt, MaterialId, Mesh, Model, NodeId,
+    PlaneModel, SolveResult, solve,
 };
 use fem_types::format::{self, File as ProjectFile, Results};
 use rfd::FileDialog;

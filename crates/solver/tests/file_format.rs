@@ -1,6 +1,6 @@
 use fem_solver::{
-    BoundaryConditions, DofId, FemError, Material, MaterialAssignment, MaterialId, MeshExt, Model,
-    Node, NodeId, PlaneModel, solve,
+    BoundaryConditions, DofId, FemError, Material, MaterialAssignment, MaterialId, Model, Node,
+    NodeId, PlaneModel, solve,
 };
 use fem_types::Mesh;
 use fem_types::format::{self, Boundary, DofValue, Results};

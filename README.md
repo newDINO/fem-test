@@ -1,6 +1,6 @@
 # FEM Test — 2D 线弹性有限元原型
 
-一个用于机械结构二维静力分析的实验性有限元软件原型。网格来自 Blender 等建模软件导出的 STL 平面薄片，也可以由外部程序用 `fem-types` 生成 `.fem` 项目；求解器、共享类型与界面分为三个 crate。
+一个用于机械结构二维静力分析的实验性有限元软件原型。网格来自 Blender 等建模软件导出的 STL 平面薄片，也可以由外部程序用 `fem-types` 生成 `.fem` 项目；共享类型、外部格式导入、求解器与界面分为四个 crate。
 
 当前版本只做**二维、小变形、线弹性、静力**分析，单元只有**三节点常应变三角形（CST）**。界面可以用 STL 导入网格，也可以直接打开/保存 `fem-types` 的 `.fem` 项目文件（网格 + 材料 + 边界条件 + 结果）。
 
@@ -59,8 +59,9 @@ cargo run -p fem-gui --release
 
 ```
 Cargo.toml                 # workspace
-crates/types/              # fem-types：网格/材料/结果结构体 + 文件格式（无 faer/nalgebra）
-crates/solver/             # fem-solver：网格、材料、CST、组装、求解、STL 导入
+crates/types/              # fem-types：网格/材料/结果结构体、网格校验 + 项目文件格式（无 faer/nalgebra）
+crates/import/             # fem-import：STL 等外部格式导入（只依赖 fem-types）
+crates/solver/             # fem-solver：材料、CST、组装、求解
 crates/gui/                # fem-gui：eframe/egui 界面 + 自定义 wgpu 视口
 assets/plate.stl           # 示例平面网格
 ```
@@ -69,26 +70,33 @@ assets/plate.stl           # 示例平面网格
 
 | 文件 | 内容 |
 | --- | --- |
-| `mesh.rs` | `NodeId` / `ElemId` / `Node` / `Mesh` / `Bounds2`、纯几何辅助 |
+| `mesh.rs` | `NodeId` / `ElemId` / `Node` / `Mesh` / `Bounds2`、纯几何辅助、`Mesh::validate` / `MeshError` |
 | `material.rs` | `Material` enum、各向同性参数 `IsotropicMaterial`、`MaterialId` |
 | `model.rs` | `PlaneModel`（全局平面假设）、`MaterialAssignment`、`Model` |
 | `result.rs` | `SolveResult` / `ElementStress`、von Mises 计算 |
 | `format.rs` | 文件头、MessagePack 读写、节点级边界条件、结果互转 |
 
-`solver` 通过 `pub use` 重新导出这些类型，原有 `fem_solver::Mesh` 等路径保持不变；`Mesh::validate`、`MaterialExt::validate`、`MaterialExt::d_matrix` 这些依赖求解器错误类型或线性代数的逻辑留在 `solver`。
+`solver` 通过 `pub use` 重新导出这些类型，原有 `fem_solver::Mesh` 等路径保持不变；网格校验是不依赖线性代数的纯几何逻辑，放在 `fem-types` 供导入器和求解器共用；`MaterialExt::validate`、`MaterialExt::d_matrix` 这些依赖求解器错误类型或线性代数的逻辑留在 `solver`。
+
+### import
+
+| 文件 | 内容 |
+| --- | --- |
+| `stl.rs` | STL 读取、轴对齐平面校验、顶点焊接、重复面删除 |
+
+`fem-import` 只依赖 `fem-types` 和 `stl_io`，不引入 faer/nalgebra；GUI 直接使用它导入 STL，求解器不再包含文件解析代码。
 
 ### solver
 
 | 文件 | 内容 |
 | --- | --- |
-| `mesh.rs` | 节点/三角形/边、包围盒、网格校验 |
+| `mesh.rs` | 重新导出 `fem-types` 的网格类型 |
 | `material.rs` | 按全局平面假设生成 D 矩阵、材料校验 |
 | `dof.rs` | 2 DOF/节点的自由度编号 |
 | `bc.rs` | 位移约束与节点力容器 |
 | `element/tri3.rs` | CST 的 B 矩阵、单元刚度、应力恢复 |
 | `assemble.rs` | 全局刚度三元组组装 |
 | `solve.rs` | 自由自由度缩减、约束反力、应力、残差 |
-| `io/stl.rs` | STL 读取、轴对齐平面校验、顶点焊接、重复面删除 |
 | `result.rs` | 位移、反力、单元应力、von Mises |
 
 实现要点：
@@ -139,7 +147,7 @@ STL 不保存拓扑，也没有统一顶点表，因此导入器会：
 
 ## 项目文件格式（fem-types）
 
-`fem-types` 是求解器和外部工具共用的数据契约，只依赖 serde / rmp-serde，不引入 faer 或 nalgebra。用 Rust 写网格生成器时只依赖它即可：
+`fem-types` 是求解器和外部工具共用的数据契约，只依赖 serde / rmp-serde，不引入 faer 或 nalgebra。用 Rust 写网格生成器时只依赖它即可；需要直接读 STL 时再加 `fem-import`（同样不依赖求解器）：
 
 ```toml
 [dependencies]
@@ -210,19 +218,21 @@ cargo test
 cargo clippy --all-targets
 ```
 
-求解器测试覆盖：
+测试覆盖：
 
-- 全节点给定位移的 patch test（应力与 D·ε 一致）；
-- 刚体平移零应力；
-- 约束不足报错；
-- 悬臂梁位移与竖向反力平衡；
-- STL 平面导入与顶点焊接；
-- 非平面 STL 拒绝；
-- 自带示例 `assets/plate.stl` 的加载与悬臂求解；
-- `fem-types` 文件往返、文件头校验（magic / 版本 / 截断 / 尾部字节）；
-- 材料库 / 逐单元分配往返、非法长度和未知 `MaterialId` 的拒绝；
-- 双材料 patch test：不同单元使用各自的 D 矩阵；
-- 从文件加载网格后求解、边界条件往返、非法 3D 分量与越界节点的拒绝。
+- `fem-solver`：
+  - 全节点给定位移的 patch test（应力与 D·ε 一致）；
+  - 刚体平移零应力、约束不足报错；
+  - 悬臂梁位移与竖向反力平衡；
+  - 双材料 patch test：不同单元使用各自的 D 矩阵；
+  - 自带示例 `assets/plate.stl` 的导入与悬臂求解（通过 `fem-import`）；
+- `fem-import`：
+  - STL 平面导入、顶点焊接（含跨量化单元边界的焊接）；
+  - 非平面 STL 拒绝；
+- `fem-types`：
+  - 文件往返、文件头校验（magic / 版本 / 截断 / 尾部字节）；
+  - 材料库 / 逐单元分配往返、非法长度和未知 `MaterialId` 的拒绝；
+  - 从文件加载网格后求解、边界条件往返、非法 3D 分量与越界节点的拒绝。
 
 GUI 测试覆盖相机平移/缩放方向、屏幕空间框选，以及在存在可用适配器时创建 shader 与两条渲染管线并验证渲染方向；没有 GPU 适配器的环境会自动跳过渲染测试。
 
@@ -232,7 +242,7 @@ GUI 测试覆盖相机平移/缩放方向、屏幕空间框选，以及在存在
 | --- | --- |
 | `faer` | 稀疏 LU |
 | `nalgebra` | 固定尺寸小矩阵 |
-| `stl_io` | STL 读写 |
+| `stl_io` | STL 解析（仅 `fem-import`） |
 | `thiserror` | 错误类型 |
 | `serde` / `rmp-serde` | 共享类型序列化与 MessagePack 文件格式 |
 | `eframe` / `egui` | 窗口与 UI（wgpu 后端；启用 `system_fonts` 处理中文回退） |

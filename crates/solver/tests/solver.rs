@@ -1,8 +1,7 @@
-use std::io::Cursor;
-
+use fem_import::{DropAxis, StlImportOptions, load_stl};
 use fem_solver::{
-    BoundaryConditions, DropAxis, Material, MaterialAssignment, MaterialExt, MaterialId, Mesh,
-    Model, Node, NodeId, PlaneModel, StlImportOptions, import_stl_mesh, solve,
+    BoundaryConditions, Material, MaterialAssignment, MaterialExt, MaterialId, Mesh, Model, Node,
+    NodeId, PlaneModel, solve,
 };
 
 fn single_triangle() -> Mesh {
@@ -197,63 +196,10 @@ fn rejects_invalid_material_assignments() {
     ));
 }
 
-fn ascii_stl_square() -> Vec<u8> {
-    let mut s = String::from("solid plate\n");
-    for (a, b, c) in [
-        ([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 5.0, 0.0]),
-        ([0.0, 0.0, 0.0], [10.0, 5.0, 0.0], [0.0, 5.0, 0.0]),
-    ] {
-        s.push_str("facet normal 0 0 1\nouter loop\n");
-        for p in [a, b, c] {
-            s.push_str(&format!("vertex {} {} {}\n", p[0], p[1], p[2]));
-        }
-        s.push_str("endloop\nendfacet\n");
-    }
-    s.push_str("endsolid plate\n");
-    s.into_bytes()
-}
-
-#[test]
-fn imports_planar_stl_and_welds_vertices() {
-    let mut cursor = Cursor::new(ascii_stl_square());
-    let stl = stl_io::read_stl(&mut cursor).unwrap();
-    let (mesh, report) = import_stl_mesh(
-        &stl,
-        StlImportOptions {
-            drop_axis: DropAxis::Z,
-            weld_tolerance: None,
-        },
-    )
-    .unwrap();
-    assert_eq!(mesh.nodes.len(), 4);
-    assert_eq!(mesh.triangles.len(), 2);
-    assert_eq!(report.imported_triangles, 2);
-}
-
-#[test]
-fn rejects_non_planar_stl() {
-    let mut s = String::from("solid bad\n");
-    for (a, b, c) in [
-        ([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 5.0, 0.0]),
-        ([0.0, 0.0, 2.0], [10.0, 5.0, 2.0], [0.0, 5.0, 2.0]),
-    ] {
-        s.push_str("facet normal 0 0 1\nouter loop\n");
-        for p in [a, b, c] {
-            s.push_str(&format!("vertex {} {} {}\n", p[0], p[1], p[2]));
-        }
-        s.push_str("endloop\nendfacet\n");
-    }
-    s.push_str("endsolid bad\n");
-    let mut cursor = Cursor::new(s.into_bytes());
-    let stl = stl_io::read_stl(&mut cursor).unwrap();
-    let error = import_stl_mesh(&stl, StlImportOptions::default()).unwrap_err();
-    assert!(matches!(error, fem_solver::FemError::NonPlanar(_)));
-}
-
 #[test]
 fn loads_the_bundled_sample_plate() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/plate.stl");
-    let (mesh, report) = fem_solver::load_stl(path, StlImportOptions::default()).unwrap();
+    let (mesh, report) = load_stl(path, StlImportOptions::default()).unwrap();
     assert_eq!(report.drop_axis, DropAxis::Z);
     assert!(mesh.nodes.len() > 4);
     assert!(mesh.triangles.len() > 4);
@@ -294,38 +240,4 @@ fn loads_the_bundled_sample_plate() {
     let result = solve(&model, &bc).unwrap();
     assert!(result.max_displacement > 0.0);
     assert!(result.max_residual < 1e-9);
-}
-
-#[test]
-fn welds_vertices_across_quantization_cells() {
-    // The shared corner is perturbed by 0.26 while the weld tolerance is 0.5,
-    // so the two copies land in different quantization cells. The neighbor
-    // search must still merge them.
-    let mut s = String::from("solid straddle\n");
-    for (a, b, c) in [
-        ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]),
-        ([0.26, 0.26, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]),
-    ] {
-        s.push_str("facet normal 0 0 1\nouter loop\n");
-        for p in [a, b, c] {
-            s.push_str(&format!("vertex {} {} {}\n", p[0], p[1], p[2]));
-        }
-        s.push_str("endloop\nendfacet\n");
-    }
-    s.push_str("endsolid straddle\n");
-
-    let mut cursor = Cursor::new(s.into_bytes());
-    let stl = stl_io::read_stl(&mut cursor).unwrap();
-    let (mesh, report) = import_stl_mesh(
-        &stl,
-        StlImportOptions {
-            drop_axis: DropAxis::Z,
-            weld_tolerance: Some(0.5),
-        },
-    )
-    .unwrap();
-
-    assert_eq!(mesh.nodes.len(), 4);
-    assert_eq!(mesh.triangles.len(), 2);
-    assert_eq!(report.welded_vertices, 4);
 }
