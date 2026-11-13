@@ -1,0 +1,13 @@
+[package]
+name = "fem-types"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["format"]
+format = ["dep:rmp-serde", "dep:thiserror"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+rmp-serde = { version = "1.3", optional = true }
+thiserror = { version = "2", optional = true }

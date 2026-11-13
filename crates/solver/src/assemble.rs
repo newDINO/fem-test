@@ -3,8 +3,8 @@ use faer::sparse::Triplet;
 use crate::dof::DofMap;
 use crate::element::Tri3Kernel;
 use crate::error::FemError;
-use crate::material::Material;
-use crate::mesh::Mesh;
+use crate::material::{Material, MaterialExt};
+use crate::mesh::{Mesh, MeshExt};
 
 pub struct Assembly {
     pub dof_map: DofMap,

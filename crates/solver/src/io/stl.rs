@@ -5,7 +5,7 @@ use std::path::Path;
 use stl_io::IndexedMesh;
 
 use crate::error::FemError;
-use crate::mesh::{Mesh, Node, NodeId, signed_area2};
+use crate::mesh::{Mesh, MeshExt, Node, NodeId, signed_area2};
 
 const ALIGNMENT_TOLERANCE: f64 = 0.999;
 const PROJECTED_AREA_TOLERANCE: f64 = 1e-12;

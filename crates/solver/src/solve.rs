@@ -8,7 +8,7 @@ use crate::element::Tri3Kernel;
 use crate::error::FemError;
 use crate::material::Material;
 use crate::mesh::{ElemId, Mesh};
-use crate::result::{ElementStress, SolveResult};
+use crate::result::{ElementStress, SolveResult, von_mises_stress};
 
 pub fn solve(
     mesh: &Mesh,
@@ -142,10 +142,7 @@ pub fn solve(
         let stress = kernel.stress(&ue);
         let (sx, sy, txy) = (stress[0], stress[1], stress[2]);
         let sz = material.sigma_z(sx, sy);
-        let von_mises = (0.5 * ((sx - sy).powi(2) + (sy - sz).powi(2) + (sz - sx).powi(2))
-            + 3.0 * txy * txy)
-            .max(0.0)
-            .sqrt();
+        let von_mises = von_mises_stress(sx, sy, txy, sz);
         stresses.push(ElementStress {
             element: ElemId(element_index as u32),
             stress: [sx, sy, txy],

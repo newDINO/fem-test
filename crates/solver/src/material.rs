@@ -1,37 +1,18 @@
 use nalgebra::Matrix3;
 
+pub use fem_types::material::{Material, PlaneModel};
+
 use crate::error::FemError;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlaneModel {
-    PlaneStress,
-    PlaneStrain,
+/// Solver-side material behavior: validation errors and the plane elasticity
+/// matrix. The plain parameters live in `fem-types`.
+pub trait MaterialExt {
+    fn validate(&self) -> Result<(), FemError>;
+    fn d_matrix(&self) -> Matrix3<f64>;
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Material {
-    /// Young's modulus. The number is unitless; the user must keep it
-    /// consistent with the geometry and loads.
-    pub youngs_modulus: f64,
-    pub poisson_ratio: f64,
-    /// Only used for plane stress. Plane strain uses unit thickness.
-    pub thickness: f64,
-    pub model: PlaneModel,
-}
-
-impl Default for Material {
-    fn default() -> Self {
-        Self {
-            youngs_modulus: 210_000.0,
-            poisson_ratio: 0.3,
-            thickness: 1.0,
-            model: PlaneModel::PlaneStress,
-        }
-    }
-}
-
-impl Material {
-    pub fn validate(&self) -> Result<(), FemError> {
+impl MaterialExt for Material {
+    fn validate(&self) -> Result<(), FemError> {
         if !self.youngs_modulus.is_finite() || self.youngs_modulus <= 0.0 {
             return Err(FemError::InvalidMaterial(
                 "E must be finite and greater than zero".to_owned(),
@@ -55,14 +36,7 @@ impl Material {
         Ok(())
     }
 
-    pub fn thickness_factor(&self) -> f64 {
-        match self.model {
-            PlaneModel::PlaneStress => self.thickness,
-            PlaneModel::PlaneStrain => 1.0,
-        }
-    }
-
-    pub fn d_matrix(&self) -> Matrix3<f64> {
+    fn d_matrix(&self) -> Matrix3<f64> {
         let e = self.youngs_modulus;
         let nu = self.poisson_ratio;
         match self.model {
@@ -94,13 +68,6 @@ impl Material {
                     c * (1.0 - 2.0 * nu) * 0.5,
                 )
             }
-        }
-    }
-
-    pub fn sigma_z(&self, sx: f64, sy: f64) -> f64 {
-        match self.model {
-            PlaneModel::PlaneStress => 0.0,
-            PlaneModel::PlaneStrain => self.poisson_ratio * (sx + sy),
         }
     }
 }

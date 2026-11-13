@@ -17,4 +17,6 @@ eframe = { version = "0.37", default-features = false, features = [
     "clipboard",
 ] }
 fem-solver = { path = "../solver" }
+fem-types = { path = "../types" }
 bytemuck = { version = "1", features = ["derive"] }
+rfd = "0.18"

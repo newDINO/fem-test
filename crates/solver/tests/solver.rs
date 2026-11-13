@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
 use fem_solver::{
-    BoundaryConditions, DropAxis, Material, Mesh, Node, NodeId, PlaneModel, StlImportOptions,
-    import_stl_mesh, solve,
+    BoundaryConditions, DropAxis, Material, MaterialExt, Mesh, Node, NodeId, PlaneModel,
+    StlImportOptions, import_stl_mesh, solve,
 };
 
 fn single_triangle() -> Mesh {

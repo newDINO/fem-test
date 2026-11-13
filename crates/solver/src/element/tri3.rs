@@ -1,7 +1,7 @@
 use nalgebra::{Matrix3, SMatrix, SVector};
 
 use crate::error::FemError;
-use crate::material::Material;
+use crate::material::{Material, MaterialExt};
 
 pub type BMatrix = SMatrix<f64, 3, 6>;
 pub type KMatrix = SMatrix<f64, 6, 6>;

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::dof::{DofId, DofMap};
+use fem_types::format::{Boundary, DofValue};
+
+use crate::dof::{DOFS_PER_NODE, DofId, DofMap};
 
 #[derive(Clone, Debug, Default)]
 pub struct BoundaryConditions {
@@ -55,4 +57,65 @@ impl BoundaryConditions {
     pub fn loaded_dof_count(&self) -> usize {
         self.forces.len()
     }
+
+    /// Convert to the node-based representation used by the file format.
+    pub fn to_file(&self) -> Boundary {
+        Boundary {
+            prescribed: self
+                .prescribed
+                .iter()
+                .map(|(&dof, &value)| DofValue {
+                    node: dof.node(),
+                    component: dof.component() as u8,
+                    value,
+                })
+                .collect(),
+            forces: self
+                .forces
+                .iter()
+                .map(|(&dof, &value)| DofValue {
+                    node: dof.node(),
+                    component: dof.component() as u8,
+                    value,
+                })
+                .collect(),
+        }
+    }
+
+    /// Build from the node-based file representation. Components that the
+    /// current 2D solver does not know (for example `Uz`) are rejected instead
+    /// of being silently dropped.
+    pub fn from_file(
+        boundary: &Boundary,
+        node_count: usize,
+    ) -> Result<Self, crate::error::FemError> {
+        let mut bc = Self::default();
+        for entry in &boundary.prescribed {
+            bc.set_prescribed(dof_from_file(entry, node_count)?, entry.value);
+        }
+        for entry in &boundary.forces {
+            bc.set_force(dof_from_file(entry, node_count)?, entry.value);
+        }
+        Ok(bc)
+    }
+}
+
+fn dof_from_file(entry: &DofValue, node_count: usize) -> Result<DofId, crate::error::FemError> {
+    let node = entry.node.index();
+    let component = entry.component as usize;
+
+    if node >= node_count {
+        return Err(crate::error::FemError::InvalidInput(format!(
+            "boundary condition references node {} outside the mesh",
+            entry.node.0
+        )));
+    }
+    if component >= DOFS_PER_NODE {
+        return Err(crate::error::FemError::InvalidInput(format!(
+            "boundary condition uses component {} but the 2D solver only has {DOFS_PER_NODE}",
+            entry.component
+        )));
+    }
+
+    Ok(DofId((node * DOFS_PER_NODE + component) as u32))
 }
