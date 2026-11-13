@@ -5,8 +5,9 @@ use std::sync::Arc;
 use eframe::egui;
 use eframe::egui_wgpu;
 use fem_solver::{
-    BoundaryConditions, DropAxis, ImportReport, Material, MaterialExt, Mesh, MeshExt, NodeId,
-    PlaneModel, SolveResult, StlImportOptions, load_stl, solve,
+    BoundaryConditions, DropAxis, ImportReport, Material, MaterialAssignment, MaterialExt,
+    MaterialId, Mesh, MeshExt, Model, NodeId, PlaneModel, SolveResult, StlImportOptions, load_stl,
+    solve,
 };
 use fem_types::format::{self, File as ProjectFile, Results};
 use rfd::FileDialog;
@@ -19,6 +20,15 @@ fn plane_model_label(model: PlaneModel) -> &'static str {
     match model {
         PlaneModel::PlaneStress => "平面应力",
         PlaneModel::PlaneStrain => "平面应变",
+    }
+}
+
+fn material_assignment_label(assignment: &MaterialAssignment) -> String {
+    match assignment {
+        MaterialAssignment::Uniform(material) => format!("均一（材料 #{}）", material.0),
+        MaterialAssignment::PerElement(materials) => {
+            format!("逐单元（{} 个单元）", materials.len())
+        }
     }
 }
 
@@ -42,7 +52,10 @@ pub struct FemApp {
     last_directory: Option<PathBuf>,
     mesh: Option<Mesh>,
     report: Option<ImportReport>,
-    material: Material,
+    plane_model: PlaneModel,
+    materials: Vec<Material>,
+    material_index: usize,
+    element_materials: MaterialAssignment,
     bc: BoundaryConditions,
     result: Option<SolveResult>,
     selection: BTreeSet<NodeId>,
@@ -81,7 +94,10 @@ impl FemApp {
             last_directory: None,
             mesh: None,
             report: None,
-            material: Material::default(),
+            plane_model: PlaneModel::PlaneStress,
+            materials: vec![Material::default()],
+            material_index: 0,
+            element_materials: MaterialAssignment::Uniform(MaterialId(0)),
             bc: BoundaryConditions::default(),
             result: None,
             selection: BTreeSet::new(),
@@ -195,6 +211,8 @@ impl FemApp {
                 let triangle_count = mesh.triangles.len();
                 self.mesh = Some(mesh);
                 self.report = Some(report);
+                self.ensure_material_library();
+                self.element_materials = MaterialAssignment::Uniform(MaterialId(0));
                 self.bc = BoundaryConditions::default();
                 self.result = None;
                 self.selection.clear();
@@ -242,16 +260,28 @@ impl FemApp {
         let node_count = file.mesh.nodes.len();
         let triangle_count = file.mesh.triangles.len();
 
+        let model = match file.model() {
+            Ok(Some(model)) => model,
+            Ok(None) => Model::uniform(
+                file.mesh.clone(),
+                PlaneModel::PlaneStress,
+                Material::default(),
+            ),
+            Err(error) => {
+                self.error = Some(error.to_string());
+                self.status = "项目文件中的材料设置无效".to_owned();
+                return;
+            }
+        };
+
         // A `.fem` file can come from an external generator, so validate the
         // topology before handing it to the renderer (which indexes nodes
         // directly).
-        if let Err(error) = file.mesh.validate() {
+        if let Err(error) = model.mesh.validate() {
             self.error = Some(error.to_string());
             self.status = "项目文件中的网格无效".to_owned();
             return;
         }
-
-        let material = file.material.unwrap_or_default();
 
         let bc = match &file.boundary {
             Some(boundary) => match BoundaryConditions::from_file(boundary, node_count) {
@@ -266,7 +296,7 @@ impl FemApp {
         };
 
         let result = match &file.results {
-            Some(results) => match results.to_solve(&file.mesh, &material) {
+            Some(results) => match results.to_solve(&model) {
                 Ok(result) => Some(result),
                 Err(error) => {
                     self.error = Some(error.to_string());
@@ -279,10 +309,19 @@ impl FemApp {
 
         let deformation_scale = result
             .as_ref()
-            .map(|result| Self::deformation_scale_for(&file.mesh, result));
+            .map(|result| Self::deformation_scale_for(&model.mesh, result));
 
-        self.mesh = Some(file.mesh);
-        self.material = material;
+        let Model {
+            mesh,
+            plane_model,
+            materials,
+            element_materials,
+        } = model;
+        self.mesh = Some(mesh);
+        self.plane_model = plane_model;
+        self.materials = materials;
+        self.material_index = 0;
+        self.element_materials = element_materials;
         self.bc = bc;
         self.result = result;
         self.report = None;
@@ -311,15 +350,13 @@ impl FemApp {
     }
 
     fn save_to_path(&mut self, path: &Path) {
-        let Some(mesh) = self.mesh.clone() else {
+        let Some(model) = self.build_model() else {
             self.error = Some("没有可保存的网格".to_owned());
             return;
         };
 
         let path = ensure_fem_extension(path);
-        let mut file = ProjectFile::new(mesh)
-            .with_material(self.material)
-            .with_boundary(self.bc.to_file());
+        let mut file = ProjectFile::from_model(model).with_boundary(self.bc.to_file());
         if let Some(result) = &self.result {
             file = file.with_results(Results::from_solve(result));
         }
@@ -336,6 +373,22 @@ impl FemApp {
                 self.status = "保存失败".to_owned();
             }
         }
+    }
+
+    fn build_model(&self) -> Option<Model> {
+        self.mesh.clone().map(|mesh| Model {
+            mesh,
+            plane_model: self.plane_model,
+            materials: self.materials.clone(),
+            element_materials: self.element_materials.clone(),
+        })
+    }
+
+    fn ensure_material_library(&mut self) {
+        if self.materials.is_empty() {
+            self.materials.push(Material::default());
+        }
+        self.material_index = self.material_index.min(self.materials.len() - 1);
     }
 
     fn deformation_scale_for(mesh: &Mesh, result: &SolveResult) -> f64 {
@@ -449,19 +502,18 @@ impl FemApp {
     }
 
     fn solve_model(&mut self) {
-        let Some(_) = self.mesh.as_ref() else {
-            self.error = Some("请先加载网格".to_owned());
-            return;
-        };
         let diagonal = self
             .mesh
             .as_ref()
             .and_then(Mesh::bounds)
             .map_or(1.0, |b| b.diagonal().max(1e-12));
 
-        let solve_result = {
-            let mesh = self.mesh.as_ref().expect("checked above");
-            solve(mesh, &self.material, &self.bc)
+        let solve_result = match self.build_model() {
+            Some(model) => solve(&model, &self.bc),
+            None => {
+                self.error = Some("请先加载网格".to_owned());
+                return;
+            }
         };
 
         match solve_result {
@@ -583,41 +635,77 @@ impl FemApp {
 
         ui.separator();
         ui.heading("材料");
+        self.ensure_material_library();
+        if self.materials.len() > 1 {
+            ui.horizontal(|ui| {
+                ui.label("编辑材料");
+                egui::ComboBox::from_id_salt("material_index")
+                    .selected_text(format!("#{}", self.material_index))
+                    .show_ui(ui, |ui| {
+                        for index in 0..self.materials.len() {
+                            ui.selectable_value(
+                                &mut self.material_index,
+                                index,
+                                format!("#{index}"),
+                            );
+                        }
+                    });
+            });
+        }
+        ui.small(format!(
+            "材料库 {} 个；单元分配：{}",
+            self.materials.len(),
+            material_assignment_label(&self.element_materials)
+        ));
+
+        let plane_model = self.plane_model;
+        let material_index = self.material_index.min(self.materials.len() - 1);
         let mut material_changed = false;
-        ui.horizontal(|ui| {
-            ui.label("E");
-            material_changed |= ui
-                .add(egui::DragValue::new(&mut self.material.youngs_modulus).speed(100.0))
-                .changed();
-        });
-        ui.horizontal(|ui| {
-            ui.label("ν");
-            material_changed |= ui
-                .add(egui::DragValue::new(&mut self.material.poisson_ratio).speed(0.005))
-                .changed();
-        });
-        ui.horizontal(|ui| {
-            ui.label("厚度");
-            material_changed |= ui
-                .add_enabled(
-                    self.material.model == PlaneModel::PlaneStress,
-                    egui::DragValue::new(&mut self.material.thickness).speed(0.1),
-                )
-                .changed();
-        });
-        let mut model = self.material.model;
+        {
+            let material = &mut self.materials[material_index];
+            if let Some(isotropic) = material.isotropic_material_mut() {
+                ui.horizontal(|ui| {
+                    ui.label("E");
+                    material_changed |= ui
+                        .add(egui::DragValue::new(&mut isotropic.youngs_modulus).speed(100.0))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("ν");
+                    material_changed |= ui
+                        .add(egui::DragValue::new(&mut isotropic.poisson_ratio).speed(0.005))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("厚度");
+                    material_changed |= ui
+                        .add_enabled(
+                            plane_model == PlaneModel::PlaneStress,
+                            egui::DragValue::new(&mut isotropic.thickness).speed(0.1),
+                        )
+                        .changed();
+                });
+            }
+        }
+
+        let mut selected_plane_model = self.plane_model;
         egui::ComboBox::from_id_salt("plane_model")
-            .selected_text(plane_model_label(model))
+            .selected_text(plane_model_label(selected_plane_model))
             .show_ui(ui, |ui| {
                 for option in [PlaneModel::PlaneStress, PlaneModel::PlaneStrain] {
-                    ui.selectable_value(&mut model, option, plane_model_label(option));
+                    ui.selectable_value(
+                        &mut selected_plane_model,
+                        option,
+                        plane_model_label(option),
+                    );
                 }
             });
-        if model != self.material.model {
-            self.material.model = model;
+        if selected_plane_model != self.plane_model {
+            self.plane_model = selected_plane_model;
             material_changed = true;
         }
-        if self.material.model == PlaneModel::PlaneStrain {
+        ui.small("平面应力 / 平面应变是全局分析设置。");
+        if self.plane_model == PlaneModel::PlaneStrain {
             ui.small("平面应变按单位厚度计算，厚度输入被忽略。");
         }
         if material_changed {
@@ -625,8 +713,13 @@ impl FemApp {
             self.status = "材料已修改，需要重新求解".to_owned();
             self.invalidate_result();
         }
-        if let Err(error) = self.material.validate() {
-            ui.colored_label(egui::Color32::from_rgb(220, 80, 60), error.to_string());
+        for (index, material) in self.materials.iter().enumerate() {
+            if let Err(error) = material.validate(self.plane_model) {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 60),
+                    format!("材料 #{index}：{error}"),
+                );
+            }
         }
 
         ui.separator();

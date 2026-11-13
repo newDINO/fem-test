@@ -1,21 +1,18 @@
 use faer::linalg::solvers::Solve;
 use faer::sparse::{SparseColMat, Triplet};
+use fem_types::model::Model;
 use nalgebra::SVector;
 
 use crate::assemble::assemble;
 use crate::bc::BoundaryConditions;
 use crate::element::Tri3Kernel;
 use crate::error::FemError;
-use crate::material::Material;
-use crate::mesh::{ElemId, Mesh};
+use crate::mesh::ElemId;
 use crate::result::{ElementStress, SolveResult, von_mises_stress};
 
-pub fn solve(
-    mesh: &Mesh,
-    material: &Material,
-    bc: &BoundaryConditions,
-) -> Result<SolveResult, FemError> {
-    let assembly = assemble(mesh, material)?;
+pub fn solve(model: &Model, bc: &BoundaryConditions) -> Result<SolveResult, FemError> {
+    let mesh = &model.mesh;
+    let assembly = assemble(model)?;
     let dof_map = &assembly.dof_map;
     let ndof = dof_map.ndof();
     let external_force = bc.force_vector(dof_map);
@@ -130,7 +127,19 @@ pub fn solve(
     let mut stresses = Vec::with_capacity(mesh.triangles.len());
     let mut max_displacement = 0.0_f64;
     for (element_index, tri) in mesh.triangles.iter().enumerate() {
-        let kernel = Tri3Kernel::new(element_index, mesh.triangle_coords(*tri), material)?;
+        let material = model
+            .material_for(ElemId(element_index as u32))
+            .ok_or_else(|| {
+                FemError::InvalidMaterial(format!(
+                    "element {element_index} has no material assignment"
+                ))
+            })?;
+        let kernel = Tri3Kernel::new(
+            element_index,
+            mesh.triangle_coords(*tri),
+            material,
+            model.plane_model,
+        )?;
         let ue = SVector::<f64, 6>::new(
             displacement[dof_map.dof(tri[0], 0).index()],
             displacement[dof_map.dof(tri[0], 1).index()],
@@ -141,7 +150,7 @@ pub fn solve(
         );
         let stress = kernel.stress(&ue);
         let (sx, sy, txy) = (stress[0], stress[1], stress[2]);
-        let sz = material.sigma_z(sx, sy);
+        let sz = material.sigma_z(model.plane_model, sx, sy);
         let von_mises = von_mises_stress(sx, sy, txy, sz);
         stresses.push(ElementStress {
             element: ElemId(element_index as u32),

@@ -1,7 +1,7 @@
 use nalgebra::{Matrix3, SMatrix, SVector};
 
 use crate::error::FemError;
-use crate::material::{Material, MaterialExt};
+use crate::material::{Material, MaterialExt, PlaneModel};
 
 pub type BMatrix = SMatrix<f64, 3, 6>;
 pub type KMatrix = SMatrix<f64, 6, 6>;
@@ -12,6 +12,7 @@ pub struct Tri3Kernel {
     pub area: f64,
     pub b: BMatrix,
     pub d: Matrix3<f64>,
+    thickness_factor: f64,
 }
 
 impl Tri3Kernel {
@@ -19,6 +20,7 @@ impl Tri3Kernel {
         element_index: usize,
         coords: [[f64; 2]; 3],
         material: &Material,
+        plane_model: PlaneModel,
     ) -> Result<Self, FemError> {
         let a = coords[0];
         let b = coords[1];
@@ -60,13 +62,19 @@ impl Tri3Kernel {
             y1 - y2,
         ) * inv_two_area;
 
-        let d = material.d_matrix();
-        Ok(Self { area, b: bmat, d })
+        let d = material.d_matrix(plane_model);
+        let thickness_factor = material.thickness_factor(plane_model);
+        Ok(Self {
+            area,
+            b: bmat,
+            d,
+            thickness_factor,
+        })
     }
 
-    pub fn stiffness(&self, material: &Material) -> KMatrix {
+    pub fn stiffness(&self) -> KMatrix {
         let db = self.d * self.b;
-        self.b.transpose() * db * (material.thickness_factor() * self.area)
+        self.b.transpose() * db * (self.thickness_factor * self.area)
     }
 
     pub fn stress(&self, local_displacement: &SVector<f64, 6>) -> SVector<f64, 3> {

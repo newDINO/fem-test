@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
 use fem_solver::{
-    BoundaryConditions, DropAxis, Material, MaterialExt, Mesh, Node, NodeId, PlaneModel,
-    StlImportOptions, import_stl_mesh, solve,
+    BoundaryConditions, DropAxis, Material, MaterialAssignment, MaterialExt, MaterialId, Mesh,
+    Model, Node, NodeId, PlaneModel, StlImportOptions, import_stl_mesh, solve,
 };
 
 fn single_triangle() -> Mesh {
@@ -22,15 +22,13 @@ fn single_triangle() -> Mesh {
     }
 }
 
+fn uniform(mesh: Mesh, material: Material) -> Model {
+    Model::uniform(mesh, PlaneModel::PlaneStress, material)
+}
+
 #[test]
 fn patch_test_all_prescribed() {
-    let mesh = single_triangle();
-    let material = Material {
-        youngs_modulus: 1000.0,
-        poisson_ratio: 0.25,
-        thickness: 1.0,
-        model: PlaneModel::PlaneStress,
-    };
+    let model = uniform(single_triangle(), Material::isotropic(1000.0, 0.25, 1.0));
     let mut bc = BoundaryConditions::default();
     // u_x = 0.01*x, u_y = -0.005*y
     let displacement = [(0.0, 0.0), (0.01, 0.0), (0.0, -0.005)];
@@ -40,9 +38,9 @@ fn patch_test_all_prescribed() {
         bc.prescribed.insert(fem_solver::DofId(node.0 * 2 + 1), *uy);
     }
 
-    let result = solve(&mesh, &material, &bc).unwrap();
+    let result = solve(&model, &bc).unwrap();
     let stress = result.stresses[0].stress;
-    let d = material.d_matrix();
+    let d = model.materials[0].d_matrix(model.plane_model);
     let expected = d * nalgebra::Vector3::new(0.01, -0.005, 0.0);
     assert!((stress[0] - expected[0]).abs() < 1e-10);
     assert!((stress[1] - expected[1]).abs() < 1e-10);
@@ -51,24 +49,22 @@ fn patch_test_all_prescribed() {
 
 #[test]
 fn rigid_body_translation_has_zero_stress() {
-    let mesh = single_triangle();
-    let material = Material::default();
+    let model = uniform(single_triangle(), Material::default());
     let mut bc = BoundaryConditions::default();
     for i in 0..3 {
         let node = NodeId(i);
         bc.prescribed.insert(fem_solver::DofId(node.0 * 2), 1.0);
         bc.prescribed.insert(fem_solver::DofId(node.0 * 2 + 1), 2.0);
     }
-    let result = solve(&mesh, &material, &bc).unwrap();
+    let result = solve(&model, &bc).unwrap();
     assert!(result.stresses[0].von_mises < 1e-9);
 }
 
 #[test]
 fn insufficient_constraints_is_reported() {
-    let mesh = single_triangle();
-    let material = Material::default();
+    let model = uniform(single_triangle(), Material::default());
     let bc = BoundaryConditions::default();
-    let error = solve(&mesh, &material, &bc).unwrap_err();
+    let error = solve(&model, &bc).unwrap_err();
     assert!(matches!(
         error,
         fem_solver::FemError::InsufficientConstraints { count: 0 }
@@ -105,13 +101,10 @@ fn rectangle_mesh(nx: usize, ny: usize, width: f64, height: f64) -> Mesh {
 
 #[test]
 fn cantilever_solves_and_balances_reactions() {
-    let mesh = rectangle_mesh(8, 2, 10.0, 2.0);
-    let material = Material {
-        youngs_modulus: 1000.0,
-        poisson_ratio: 0.3,
-        thickness: 1.0,
-        model: PlaneModel::PlaneStress,
-    };
+    let model = uniform(
+        rectangle_mesh(8, 2, 10.0, 2.0),
+        Material::isotropic(1000.0, 0.3, 1.0),
+    );
     let mut bc = BoundaryConditions::default();
     for node in 0..=2 {
         let node = NodeId((node * 9) as u32); // left edge, j=0..2
@@ -125,14 +118,83 @@ fn cantilever_solves_and_balances_reactions() {
             .insert(fem_solver::DofId(node.0 * 2 + 1), force_per_node);
     }
 
-    let result = solve(&mesh, &material, &bc).unwrap();
+    let result = solve(&model, &bc).unwrap();
     assert!(result.max_displacement > 0.0);
     assert!(result.max_residual < 1e-8);
 
-    let total_y_reaction: f64 = (0..mesh.nodes.len())
+    let total_y_reaction: f64 = (0..model.mesh.nodes.len())
         .map(|i| result.reactions[i * 2 + 1])
         .sum();
     assert!((total_y_reaction - 10.0).abs() < 1e-8);
+}
+
+#[test]
+fn per_element_materials_use_their_own_d_matrix() {
+    let mut model = uniform(
+        rectangle_mesh(1, 1, 1.0, 1.0),
+        Material::isotropic(1000.0, 0.25, 1.0),
+    );
+    model.materials.push(Material::isotropic(2000.0, 0.25, 1.0));
+    model.element_materials = MaterialAssignment::PerElement(vec![MaterialId(0), MaterialId(1)]);
+
+    let mut bc = BoundaryConditions::default();
+    for (index, node) in model.mesh.nodes.iter().enumerate() {
+        bc.prescribed
+            .insert(fem_solver::DofId(index as u32 * 2), 0.01 * node.position[0]);
+        bc.prescribed.insert(
+            fem_solver::DofId(index as u32 * 2 + 1),
+            -0.005 * node.position[1],
+        );
+    }
+
+    let result = solve(&model, &bc).unwrap();
+    let strain = nalgebra::Vector3::new(0.01, -0.005, 0.0);
+
+    for stress in &result.stresses {
+        let material_id = model.element_materials.get(stress.element).unwrap();
+        let expected = model.materials[material_id.index()].d_matrix(model.plane_model) * strain;
+        for component in 0..3 {
+            assert!((stress.stress[component] - expected[component]).abs() < 1e-10);
+        }
+    }
+
+    assert!(
+        (result.stresses[0].stress[0] - result.stresses[1].stress[0]).abs() > 1e-6,
+        "the two materials should produce different stresses"
+    );
+}
+
+#[test]
+fn rejects_invalid_material_assignments() {
+    let bc = BoundaryConditions::default();
+
+    let mut model = uniform(single_triangle(), Material::default());
+    model.element_materials = MaterialAssignment::PerElement(Vec::new());
+    assert!(matches!(
+        solve(&model, &bc).unwrap_err(),
+        fem_solver::FemError::InvalidMaterial(_)
+    ));
+
+    let mut model = uniform(single_triangle(), Material::default());
+    model.element_materials = MaterialAssignment::PerElement(vec![MaterialId(1)]);
+    assert!(matches!(
+        solve(&model, &bc).unwrap_err(),
+        fem_solver::FemError::InvalidMaterial(_)
+    ));
+
+    let mut model = uniform(single_triangle(), Material::default());
+    model.element_materials = MaterialAssignment::Uniform(MaterialId(2));
+    assert!(matches!(
+        solve(&model, &bc).unwrap_err(),
+        fem_solver::FemError::InvalidMaterial(_)
+    ));
+
+    let mut model = uniform(single_triangle(), Material::default());
+    model.materials.clear();
+    assert!(matches!(
+        solve(&model, &bc).unwrap_err(),
+        fem_solver::FemError::InvalidMaterial(_)
+    ));
 }
 
 fn ascii_stl_square() -> Vec<u8> {
@@ -227,7 +289,9 @@ fn loads_the_bundled_sample_plate() {
     for node in &tip_nodes {
         bc.set_force(fem_solver::DofId(node.0 * 2 + 1), -1.0);
     }
-    let result = solve(&mesh, &Material::default(), &bc).unwrap();
+
+    let model = Model::uniform(mesh, PlaneModel::PlaneStress, Material::default());
+    let result = solve(&model, &bc).unwrap();
     assert!(result.max_displacement > 0.0);
     assert!(result.max_residual < 1e-9);
 }

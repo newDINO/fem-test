@@ -14,7 +14,7 @@
   - 每个节点、每个自由度（Ux、Uy）的位移约束，可给非零指定位移。
   - 每个节点、每个自由度的集中力。
   - 支持点击/拖拽框选多选（Shift/Ctrl 追加）后批量施加。
-- 材料参数：杨氏模量 E、泊松比 ν、厚度 t，平面应力 / 平面应变可切换。
+- 材料参数：杨氏模量 E、泊松比 ν、厚度 t；材料库支持多个材料，单元可以按索引引用不同材料。平面应力 / 平面应变是全局分析设置。
 - 求解后在视口中显示：
   - 变形后的网格（可调放大倍数、可关闭）；
   - 按 von Mises 应力着色的三角形；
@@ -70,18 +70,19 @@ assets/plate.stl           # 示例平面网格
 | 文件 | 内容 |
 | --- | --- |
 | `mesh.rs` | `NodeId` / `ElemId` / `Node` / `Mesh` / `Bounds2`、纯几何辅助 |
-| `material.rs` | `Material` / `PlaneModel` 参数 |
+| `material.rs` | `Material` enum、各向同性参数 `IsotropicMaterial`、`MaterialId` |
+| `model.rs` | `PlaneModel`（全局平面假设）、`MaterialAssignment`、`Model` |
 | `result.rs` | `SolveResult` / `ElementStress`、von Mises 计算 |
 | `format.rs` | 文件头、MessagePack 读写、节点级边界条件、结果互转 |
 
-`solver` 通过 `pub use` 重新导出这些类型，原有 `fem_solver::Mesh` 等路径保持不变；`Mesh::validate`、`Material::validate`、`Material::d_matrix` 这些依赖求解器错误类型或线性代数的逻辑留在 `solver`。
+`solver` 通过 `pub use` 重新导出这些类型，原有 `fem_solver::Mesh` 等路径保持不变；`Mesh::validate`、`MaterialExt::validate`、`MaterialExt::d_matrix` 这些依赖求解器错误类型或线性代数的逻辑留在 `solver`。
 
 ### solver
 
 | 文件 | 内容 |
 | --- | --- |
 | `mesh.rs` | 节点/三角形/边、包围盒、网格校验 |
-| `material.rs` | 平面应力/平面应变 D 矩阵、材料校验 |
+| `material.rs` | 按全局平面假设生成 D 矩阵、材料校验 |
 | `dof.rs` | 2 DOF/节点的自由度编号 |
 | `bc.rs` | 位移约束与节点力容器 |
 | `element/tri3.rs` | CST 的 B 矩阵、单元刚度、应力恢复 |
@@ -95,7 +96,8 @@ assets/plate.stl           # 示例平面网格
 - 全局方程组用 `faer` 的稀疏 LU（`SparseColMat::sp_lu`）求解，便于以后换 Cholesky；
 - 小矩阵（3×3、6×6）用 `nalgebra` 的固定尺寸类型；
 - 约束处理采用**自由自由度缩减**，同时保留完整刚度矩阵用于计算约束反力 `r = K u − f`；
-- 平面应力使用厚度，平面应变按单位厚度计算并输出非零 `σz`。
+- 平面应力使用厚度，平面应变按单位厚度计算并输出非零 `σz`；
+- 每个单元通过 `MaterialAssignment` 引用材料库；`Uniform` 分配不会逐单元展开，`PerElement` 则要求与三角形数一致。
 
 ### gui
 
@@ -145,10 +147,22 @@ fem-types = { path = "../fem-test/crates/types" }
 ```
 
 ```rust
-use fem_types::{format, Mesh, Node, NodeId};
+use fem_types::{format, Material, Model, PlaneModel};
 
-let mesh = Mesh { nodes, triangles };
-format::write_to_path("plate.fem", &format::File::new(mesh))?;
+let model = Model::uniform(mesh, PlaneModel::PlaneStress, Material::default());
+format::write_to_path("plate.fem", &format::File::from_model(model))?;
+```
+
+需要多材料时，材料库和单元分配分开写：
+
+```rust
+use fem_types::{MaterialAssignment, MaterialId};
+
+let mut model = Model::uniform(mesh, PlaneModel::PlaneStress, Material::default());
+model.materials.push(Material::isotropic(70_000.0, 0.33, 1.0));
+model.element_materials = MaterialAssignment::PerElement(vec![
+    MaterialId(0), MaterialId(1), /* 每个三角形一项 */
+]);
 ```
 
 文件布局：
@@ -158,24 +172,30 @@ format::write_to_path("plate.fem", &format::File::new(mesh))?;
 ```
 
 - 负载使用 `rmp-serde` 的命名模式（struct 编码为 map），字段缺失时更容易发现；
-- 一个文件可以只含 `mesh`，也可以附带 `material`、`boundary`、`results`；
+- 一个文件可以只含 `mesh`（网格生成器不需要知道材料），也可以是一个完整模型：`plane_model`、`materials`、`element_materials` 必须同时存在；
+- `PlaneModel`（平面应力 / 平面应变）是全局分析设置，不属于单个材料；
+- 材料库是 `Vec<Material>`；`MaterialAssignment` 有两种等价表示：`Uniform(MaterialId)` 和 `PerElement(Vec<MaterialId>)`。uniform 变体显式保存材料 id，不使用“空数组代表材料 0”的隐式约定；
 - 边界条件按**节点 + 分量**存储（`0 = Ux, 1 = Uy, 2 = Uz`），不依赖求解器内部的 DOF 编号；
-- 结果按节点/单元顺序保存原始量，von Mises、σz、最大位移在读取时重算，避免文件内部自相矛盾；
-- 读取时检查 magic、版本号和负载后的多余字节；版本不匹配会返回 `FormatError::UnsupportedVersion`，不会静默解析出错。
+- 结果按节点/单元顺序保存原始量，von Mises、σz、最大位移在读取时按全局平面假设和逐单元材料重算，避免文件内部自相矛盾；
+- 读取时检查 magic、版本号和负载后的多余字节；版本不匹配会返回 `FormatError::UnsupportedVersion`，不会静默解析出错；
+- 格式仍在早期开发阶段，版本号暂时固定为 **1**，字段还可能变化，不保证旧文件兼容。
 
 | 函数 | 用途 |
 | --- | --- |
 | `format::read` / `read_bytes` | 从 reader / 内存读取 |
 | `format::write` | 写到任意 writer |
 | `format::read_from_path` / `write_to_path` | 路径版本，写入使用临时文件 + rename |
+| `File::from_model` / `File::model` | 完整模型与文件表示互转（mesh-only 文件返回 `None`） |
 | `Results::from_solve` / `to_solve` | 求解结果与文件表示互转 |
 | `BoundaryConditions::to_file` / `from_file` | 求解器边界条件与文件表示互转 |
 
-GUI 的“打开…”同时接受 `.fem` 和 `.stl`：`.fem` 会恢复网格、材料、边界条件以及（若存在）结果，`.stl` 则走导入流程并清空边界条件。保存时始终写 `.fem`，第一次保存会建议与 STL 同名的文件名。
+GUI 的“打开…”同时接受 `.fem` 和 `.stl`：`.fem` 会恢复网格、材料库、逐单元材料分配、边界条件以及（若存在）结果，`.stl` 则走导入流程并清空边界条件与材料分配（材料库保留）。保存时始终写 `.fem`，第一次保存会建议与 STL 同名的文件名。
 
 ## 已知限制 / 后续方向
 
 - 只支持 2D、3 节点三角形、小变形线弹性静力；
+- 材料目前只有各向同性（`Material::Isotropic`），但 enum 已为各向异性等类型预留扩展点；
+- GUI 可以编辑材料库中的每个材料，但还没有“选择单元并赋予材料”的交互；逐单元分配目前主要来自外部 `.fem` 文件，GUI 会保留并求解；
 - 无网格生成、无分布载荷、无重力、无接触、无非线性；
 - 打开 `.fem` 时会对网格做拓扑校验，但结果只检查尺寸一致性、不重新求解（避免“以文件为准”和“重算”产生分歧）；
 - 视角为固定 XY 平面，没有 3D 旋转；
@@ -200,6 +220,8 @@ cargo clippy --all-targets
 - 非平面 STL 拒绝；
 - 自带示例 `assets/plate.stl` 的加载与悬臂求解；
 - `fem-types` 文件往返、文件头校验（magic / 版本 / 截断 / 尾部字节）；
+- 材料库 / 逐单元分配往返、非法长度和未知 `MaterialId` 的拒绝；
+- 双材料 patch test：不同单元使用各自的 D 矩阵；
 - 从文件加载网格后求解、边界条件往返、非法 3D 分量与越界节点的拒绝。
 
 GUI 测试覆盖相机平移/缩放方向、屏幕空间框选，以及在存在可用适配器时创建 shader 与两条渲染管线并验证渲染方向；没有 GPU 适配器的环境会自动跳过渲染测试。

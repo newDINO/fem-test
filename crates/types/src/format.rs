@@ -13,12 +13,16 @@
 //! an incompatible version *before* trying to deserialize it. The payload uses
 //! `rmp-serde` with named fields, so adding a new optional field is a
 //! backwards-compatible change as long as the version stays the same.
+//!
+//! The format is still under active development: it stays at version 1 even
+//! while fields change, and only stable formats will get migration code.
 
 use std::io::{Read, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::model::{MaterialAssignment, Model, PlaneModel};
 use crate::result::von_mises_stress;
 use crate::{ElemId, ElementStress, Material, Mesh, NodeId, SolveResult};
 
@@ -26,13 +30,18 @@ pub const MAGIC: [u8; 4] = *b"FEMS";
 pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 6;
 
-/// A complete file. Sections that are not needed are left as `None`, which
-/// keeps a mesh-only file small and makes the intent explicit.
+/// A file. The mesh is always present; the analysis fields form one unit:
+/// either all of `plane_model`, `materials` and `element_materials` are present
+/// (a complete model), or none of them are (a mesh-only file).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct File {
     pub mesh: Mesh,
     #[serde(default)]
-    pub material: Option<Material>,
+    pub plane_model: Option<PlaneModel>,
+    #[serde(default)]
+    pub materials: Vec<Material>,
+    #[serde(default)]
+    pub element_materials: Option<MaterialAssignment>,
     #[serde(default)]
     pub boundary: Option<Boundary>,
     #[serde(default)]
@@ -40,18 +49,33 @@ pub struct File {
 }
 
 impl File {
+    /// A mesh-only file, for mesh generators that do not know about materials.
     pub fn new(mesh: Mesh) -> Self {
         Self {
             mesh,
-            material: None,
+            plane_model: None,
+            materials: Vec::new(),
+            element_materials: None,
             boundary: None,
             results: None,
         }
     }
 
-    pub fn with_material(mut self, material: Material) -> Self {
-        self.material = Some(material);
-        self
+    pub fn from_model(model: Model) -> Self {
+        let Model {
+            mesh,
+            plane_model,
+            materials,
+            element_materials,
+        } = model;
+        Self {
+            mesh,
+            plane_model: Some(plane_model),
+            materials,
+            element_materials: Some(element_materials),
+            boundary: None,
+            results: None,
+        }
     }
 
     pub fn with_boundary(mut self, boundary: Boundary) -> Self {
@@ -62,6 +86,44 @@ impl File {
     pub fn with_results(mut self, results: Results) -> Self {
         self.results = Some(results);
         self
+    }
+
+    /// Build the complete analysis model. Returns `Ok(None)` for a mesh-only
+    /// file; a partially specified analysis section is an error.
+    pub fn model(&self) -> Result<Option<Model>, FormatError> {
+        let has_analysis = self.plane_model.is_some()
+            || !self.materials.is_empty()
+            || self.element_materials.is_some();
+        if !has_analysis {
+            return Ok(None);
+        }
+
+        let Some(plane_model) = self.plane_model else {
+            return Err(FormatError::InvalidModel(
+                "plane model is missing (materials are present)".to_owned(),
+            ));
+        };
+        if self.materials.is_empty() {
+            return Err(FormatError::InvalidModel(
+                "material library is empty (plane model is present)".to_owned(),
+            ));
+        }
+        let Some(element_materials) = &self.element_materials else {
+            return Err(FormatError::InvalidModel(
+                "element material assignment is missing".to_owned(),
+            ));
+        };
+
+        let model = Model {
+            mesh: self.mesh.clone(),
+            plane_model,
+            materials: self.materials.clone(),
+            element_materials: element_materials.clone(),
+        };
+        model
+            .validate_materials()
+            .map_err(|error| FormatError::InvalidModel(error.to_string()))?;
+        Ok(Some(model))
     }
 }
 
@@ -115,7 +177,9 @@ impl Results {
         }
     }
 
-    pub fn to_solve(&self, mesh: &Mesh, material: &Material) -> Result<SolveResult, FormatError> {
+    pub fn to_solve(&self, model: &Model) -> Result<SolveResult, FormatError> {
+        let mesh = &model.mesh;
+
         if self.displacements.len() != mesh.nodes.len() {
             return Err(FormatError::InvalidResult(format!(
                 "results contain {} nodes but the mesh has {}",
@@ -130,6 +194,9 @@ impl Results {
                 mesh.triangles.len()
             )));
         }
+        model
+            .validate_materials()
+            .map_err(|error| FormatError::InvalidModel(error.to_string()))?;
 
         let displacements = self.displacements.iter().flatten().copied().collect();
         let reactions = match &self.reactions {
@@ -146,20 +213,20 @@ impl Results {
             None => vec![0.0; mesh.nodes.len() * 2],
         };
 
-        let stresses = self
-            .stresses
-            .iter()
-            .enumerate()
-            .map(|(index, stress)| {
-                let sigma_z = material.sigma_z(stress[0], stress[1]);
-                ElementStress {
-                    element: ElemId(index as u32),
-                    stress: *stress,
-                    sigma_z,
-                    von_mises: von_mises_stress(stress[0], stress[1], stress[2], sigma_z),
-                }
-            })
-            .collect();
+        let mut stresses = Vec::with_capacity(self.stresses.len());
+        for (index, stress) in self.stresses.iter().enumerate() {
+            let element = ElemId(index as u32);
+            let material = model.material_for(element).ok_or_else(|| {
+                FormatError::InvalidModel(format!("element {index} has no material"))
+            })?;
+            let sigma_z = material.sigma_z(model.plane_model, stress[0], stress[1]);
+            stresses.push(ElementStress {
+                element,
+                stress: *stress,
+                sigma_z,
+                von_mises: von_mises_stress(stress[0], stress[1], stress[2], sigma_z),
+            });
+        }
 
         let max_displacement = self
             .displacements
@@ -193,6 +260,8 @@ pub enum FormatError {
     Encode(#[from] rmp_serde::encode::Error),
     #[error("trailing bytes after the payload")]
     TrailingBytes,
+    #[error("invalid analysis model in file: {0}")]
+    InvalidModel(String),
     #[error("invalid result file: {0}")]
     InvalidResult(String),
 }

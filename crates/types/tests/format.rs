@@ -1,6 +1,7 @@
 use fem_types::format::{self, Boundary, DofValue, File, FormatError, Results};
 use fem_types::{
-    ElemId, ElementStress, Material, Mesh, Node, NodeId, PlaneModel, SolveResult, von_mises_stress,
+    ElemId, ElementStress, Material, MaterialAssignment, MaterialId, Mesh, Model, Node, NodeId,
+    PlaneModel, SolveResult, von_mises_stress,
 };
 
 fn triangle_mesh() -> Mesh {
@@ -20,13 +21,16 @@ fn triangle_mesh() -> Mesh {
     }
 }
 
+fn triangle_model() -> Model {
+    Model::uniform(
+        triangle_mesh(),
+        PlaneModel::PlaneStress,
+        Material::isotropic(1000.0, 0.25, 1.0),
+    )
+}
+
 fn triangle_file() -> File {
-    File::new(triangle_mesh()).with_material(Material {
-        youngs_modulus: 1000.0,
-        poisson_ratio: 0.25,
-        thickness: 1.0,
-        model: PlaneModel::PlaneStress,
-    })
+    File::from_model(triangle_model())
 }
 
 fn encode(file: &File) -> Vec<u8> {
@@ -94,7 +98,16 @@ fn rejects_truncated_and_trailing_bytes() {
 }
 
 #[test]
-fn model_roundtrip_keeps_boundary() {
+fn mesh_only_file_has_no_model() {
+    let file = File::new(triangle_mesh());
+    let decoded = format::read_bytes(&encode(&file)).unwrap();
+
+    assert_eq!(decoded, file);
+    assert!(decoded.model().unwrap().is_none());
+}
+
+#[test]
+fn model_roundtrip_keeps_boundary_and_assignment() {
     let boundary = Boundary {
         prescribed: vec![
             DofValue {
@@ -115,20 +128,35 @@ fn model_roundtrip_keeps_boundary() {
         }],
     };
 
-    let file = triangle_file().with_boundary(boundary.clone());
+    let mut model = triangle_model();
+    model.materials.push(Material::isotropic(2000.0, 0.3, 2.0));
+    model.element_materials = MaterialAssignment::PerElement(vec![MaterialId(1)]);
+
+    let file = File::from_model(model.clone()).with_boundary(boundary.clone());
     let decoded = format::read_bytes(&encode(&file)).unwrap();
 
     assert_eq!(decoded.boundary, Some(boundary));
-    assert_eq!(decoded.material, file.material);
+    assert_eq!(decoded.model().unwrap(), Some(model));
+}
+
+#[test]
+fn rejects_unknown_material_in_assignment() {
+    let mut file = triangle_file();
+    file.element_materials = Some(MaterialAssignment::Uniform(MaterialId(1)));
+
+    assert!(matches!(
+        file.model().unwrap_err(),
+        FormatError::InvalidModel(_)
+    ));
 }
 
 #[test]
 fn results_roundtrip_and_recompute_derived_values() {
-    let mesh = triangle_mesh();
-    let material = Material::default();
+    let model = triangle_model();
+    let material = &model.materials[0];
 
     let stress = [10.0, 20.0, 30.0];
-    let sigma_z = material.sigma_z(stress[0], stress[1]);
+    let sigma_z = material.sigma_z(model.plane_model, stress[0], stress[1]);
     let result = SolveResult {
         displacements: vec![0.0, 0.0, 0.001, 0.0, 0.0, -0.002],
         reactions: vec![1.0, 2.0, 0.0, 0.0, 0.0, 0.0],
@@ -146,10 +174,10 @@ fn results_roundtrip_and_recompute_derived_values() {
     let decoded = format::read_bytes(&encode(&file)).unwrap();
     let loaded = decoded.results.as_ref().unwrap();
 
-    assert_eq!(loaded.displacements.len(), mesh.nodes.len());
+    assert_eq!(loaded.displacements.len(), model.mesh.nodes.len());
     assert_eq!(loaded.stresses, vec![stress]);
 
-    let rebuilt = loaded.to_solve(&mesh, &material).unwrap();
+    let rebuilt = loaded.to_solve(&model).unwrap();
     assert_eq!(rebuilt.stresses, result.stresses);
     assert!((rebuilt.max_displacement - 0.002).abs() < 1e-15);
     assert!((rebuilt.max_residual - 1e-12).abs() < 1e-20);
@@ -157,7 +185,6 @@ fn results_roundtrip_and_recompute_derived_values() {
 
 #[test]
 fn to_solve_rejects_size_mismatch() {
-    let mesh = triangle_mesh();
     let results = Results {
         displacements: vec![[0.0, 0.0]],
         reactions: None,
@@ -166,7 +193,7 @@ fn to_solve_rejects_size_mismatch() {
     };
 
     assert!(matches!(
-        results.to_solve(&mesh, &Material::default()).unwrap_err(),
+        results.to_solve(&triangle_model()).unwrap_err(),
         FormatError::InvalidResult(_)
     ));
 }

@@ -9,11 +9,13 @@
 
 pub mod material;
 pub mod mesh;
+pub mod model;
 pub mod result;
 
 #[cfg(feature = "format")]
 pub mod format;
 
-pub use material::{Material, PlaneModel};
+pub use material::{IsotropicMaterial, Material, MaterialId};
 pub use mesh::{Bounds2, ElemId, Mesh, Node, NodeId, signed_area2};
+pub use model::{MaterialAssignment, MaterialAssignmentError, Model, PlaneModel};
 pub use result::{ElementStress, SolveResult, von_mises_stress};

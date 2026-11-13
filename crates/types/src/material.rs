@@ -1,45 +1,88 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PlaneModel {
-    PlaneStress,
-    PlaneStrain,
+use crate::model::PlaneModel;
+
+/// Stable index into the material library of a [`crate::Model`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MaterialId(pub u32);
+
+impl MaterialId {
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Constitutive model. New material kinds (orthotropic, temperature dependent,
+/// ...) become additional variants; the element-to-material assignment does not
+/// change.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Material {
+    Isotropic(IsotropicMaterial),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Material {
+pub struct IsotropicMaterial {
     /// Young's modulus. The number is unitless; the user must keep it
     /// consistent with the geometry and loads.
     pub youngs_modulus: f64,
     pub poisson_ratio: f64,
     /// Only used for plane stress. Plane strain uses unit thickness.
     pub thickness: f64,
-    pub model: PlaneModel,
 }
 
-impl Default for Material {
+impl Default for IsotropicMaterial {
     fn default() -> Self {
         Self {
             youngs_modulus: 210_000.0,
             poisson_ratio: 0.3,
             thickness: 1.0,
-            model: PlaneModel::PlaneStress,
         }
     }
 }
 
+impl Default for Material {
+    fn default() -> Self {
+        Self::Isotropic(IsotropicMaterial::default())
+    }
+}
+
 impl Material {
-    pub fn thickness_factor(&self) -> f64 {
-        match self.model {
-            PlaneModel::PlaneStress => self.thickness,
-            PlaneModel::PlaneStrain => 1.0,
+    pub const fn isotropic(youngs_modulus: f64, poisson_ratio: f64, thickness: f64) -> Self {
+        Self::Isotropic(IsotropicMaterial {
+            youngs_modulus,
+            poisson_ratio,
+            thickness,
+        })
+    }
+
+    pub fn isotropic_material(&self) -> Option<&IsotropicMaterial> {
+        match self {
+            Self::Isotropic(material) => Some(material),
         }
     }
 
-    pub fn sigma_z(&self, sx: f64, sy: f64) -> f64 {
-        match self.model {
-            PlaneModel::PlaneStress => 0.0,
-            PlaneModel::PlaneStrain => self.poisson_ratio * (sx + sy),
+    pub fn isotropic_material_mut(&mut self) -> Option<&mut IsotropicMaterial> {
+        match self {
+            Self::Isotropic(material) => Some(material),
+        }
+    }
+
+    /// Thickness scale used by the stiffness integral for the given analysis
+    /// assumption.
+    pub fn thickness_factor(&self, plane_model: PlaneModel) -> f64 {
+        match (self, plane_model) {
+            (Self::Isotropic(material), PlaneModel::PlaneStress) => material.thickness,
+            (Self::Isotropic(_), PlaneModel::PlaneStrain) => 1.0,
+        }
+    }
+
+    /// Out-of-plane stress. Non-zero only for plane strain.
+    pub fn sigma_z(&self, plane_model: PlaneModel, sx: f64, sy: f64) -> f64 {
+        match (self, plane_model) {
+            (Self::Isotropic(_), PlaneModel::PlaneStress) => 0.0,
+            (Self::Isotropic(material), PlaneModel::PlaneStrain) => {
+                material.poisson_ratio * (sx + sy)
+            }
         }
     }
 }
