@@ -64,9 +64,12 @@ pub fn solve(model: &Model, bc: &BoundaryConditions) -> Result<SolveResult, FemE
     let mut displacement = relations.constant.clone();
 
     if free_count > 0 {
-        let reduced =
-            SparseColMat::<usize, f64>::try_new_from_triplets(free_count, free_count, &reduced_triplets)
-                .map_err(|e| FemError::SingularMatrix(format!("{e:?}")))?;
+        let reduced = SparseColMat::<usize, f64>::try_new_from_triplets(
+            free_count,
+            free_count,
+            &reduced_triplets,
+        )
+        .map_err(|e| FemError::SingularMatrix(format!("{e:?}")))?;
 
         let lu = reduced.sp_lu().map_err(|e| {
             FemError::SingularMatrix(format!(
@@ -100,12 +103,18 @@ pub fn solve(model: &Model, bc: &BoundaryConditions) -> Result<SolveResult, FemE
         reactions[i] -= external_force[i];
     }
 
-    // Check equilibrium on the independent (master) DOFs only. Slave and fixed
-    // rows carry constraint reactions and are intentionally not zero.
-    let max_residual = relations
-        .masters
+    // Check equilibrium on the independent (reduced) DOFs. A single master row
+    // is not balanced by itself: the constraint forces of its slaves are
+    // transferred to it, so the reactions of the whole tied set must cancel.
+    let mut reduced_reactions = vec![0.0; free_count];
+    for i in 0..ndof {
+        if let Some(ri) = relations.reduced_index[i] {
+            reduced_reactions[ri] += reactions[i];
+        }
+    }
+    let max_residual = reduced_reactions
         .iter()
-        .map(|&i| reactions[i].abs())
+        .map(|value| value.abs())
         .fold(0.0_f64, f64::max);
 
     let mut stresses = Vec::with_capacity(mesh.triangles.len());

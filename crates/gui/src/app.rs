@@ -771,6 +771,7 @@ impl FemApp {
         }
         ui.horizontal(|ui| {
             ui.small(format!("约束 DOF：{}", self.bc.prescribed.len()));
+            ui.small(format!("周期连接：{}", self.bc.link_count()));
             ui.small(format!("载荷 DOF：{}", self.bc.forces.len()));
         });
         if ui.button("清除全部边界条件").clicked() {

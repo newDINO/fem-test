@@ -124,6 +124,36 @@ fn periodic_patch_test_reproduces_uniform_strain() {
         }
     }
 
+    // The patch test should reproduce the macro strain element by element,
+    // not only the resulting stress.
+    let dofs = DofMap::new(model.mesh.nodes.len());
+    for (index, triangle) in model.mesh.triangles.iter().enumerate() {
+        let kernel = fem_solver::element::Tri3Kernel::new(
+            index,
+            model.mesh.triangle_coords(*triangle),
+            &model.materials[0],
+            model.plane_model,
+        )
+        .unwrap();
+        let local = nalgebra::SVector::<f64, 6>::new(
+            result.displacements[dofs.dof(triangle[0], 0).index()],
+            result.displacements[dofs.dof(triangle[0], 1).index()],
+            result.displacements[dofs.dof(triangle[1], 0).index()],
+            result.displacements[dofs.dof(triangle[1], 1).index()],
+            result.displacements[dofs.dof(triangle[2], 0).index()],
+            result.displacements[dofs.dof(triangle[2], 1).index()],
+        );
+        let element_strain = kernel.b * local;
+        for component in 0..3 {
+            assert!(
+                (element_strain[component] - strain[component]).abs() < 1e-12,
+                "element {index} strain component {component}: got {}, expected {}",
+                element_strain[component],
+                strain[component]
+            );
+        }
+    }
+
     assert!(
         result.max_residual < 1e-9,
         "residual {} is too large",
@@ -131,8 +161,8 @@ fn periodic_patch_test_reproduces_uniform_strain() {
     );
 
     for link in &bc.links {
-        let actual = result.displacements[link.slave.index()]
-            - result.displacements[link.master.index()];
+        let actual =
+            result.displacements[link.slave.index()] - result.displacements[link.master.index()];
         assert!(
             (actual - link.offset).abs() < 1e-12,
             "link {:?} -> {:?}: got jump {actual}, expected {}",
@@ -170,11 +200,45 @@ fn homogeneous_periodic_cell_reproduces_d_matrix() {
         for column in 0..3 {
             let expected = d[(row, column)];
             assert!(
-                (effective[row][column] - expected).abs()
-                    < 1e-7 * expected.abs().max(1.0),
+                (effective[row][column] - expected).abs() < 1e-7 * expected.abs().max(1.0),
                 "C[{row}][{column}]: got {}, expected {expected}",
                 effective[row][column]
             );
+        }
+    }
+}
+
+#[test]
+fn periodic_boundary_survives_file_roundtrip() {
+    let (nx, ny) = (2, 1);
+    let (width, height) = (1.0, 1.0);
+    let model = Model::uniform(
+        rectangle_mesh(nx, ny, width, height),
+        PlaneModel::PlaneStress,
+        Material::isotropic(1000.0, 0.3, 1.0),
+    );
+    let strain = [1e-3, 2e-4, 3e-5];
+    let bc = periodic_bc(&model.mesh, nx, ny, width, height, strain);
+
+    let file = fem_types::format::File::from_model(model.clone()).with_boundary(bc.to_file());
+    let mut bytes = Vec::new();
+    fem_types::format::write(&mut bytes, &file).unwrap();
+    let decoded = fem_types::format::read_bytes(&bytes).unwrap();
+
+    let loaded_model = decoded.model().unwrap().unwrap();
+    let loaded_bc = BoundaryConditions::from_file(
+        decoded.boundary.as_ref().unwrap(),
+        loaded_model.mesh.nodes.len(),
+    )
+    .unwrap();
+    assert_eq!(loaded_bc.links, bc.links);
+
+    let result = solve(&loaded_model, &loaded_bc).unwrap();
+    let d = loaded_model.materials[0].d_matrix(loaded_model.plane_model);
+    let expected = d * nalgebra::Vector3::new(strain[0], strain[1], strain[2]);
+    for stress in &result.stresses {
+        for component in 0..3 {
+            assert!((stress.stress[component] - expected[component]).abs() < 1e-9);
         }
     }
 }
@@ -230,11 +294,4 @@ fn chain_of_links_is_applied_by_the_solver() {
     let ux = |node: NodeId| result.displacements[dofs.dof(node, 0).index()];
     assert!((ux(NodeId(1)) - ux(NodeId(0)) - 0.1).abs() < 1e-12);
     assert!((ux(NodeId(2)) - ux(NodeId(1)) - 0.2).abs() < 1e-12);
-}
-
-// Keep the `Constraint` import used when the test module grows; this also
-// documents that links can be built directly through the solver type.
-#[allow(dead_code)]
-fn direct_link() -> Constraint {
-    Constraint::new(DofId(1), DofId(0), 0.0)
 }

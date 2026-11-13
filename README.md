@@ -14,6 +14,7 @@
   - 每个节点、每个自由度（Ux、Uy）的位移约束，可给非零指定位移。
   - 每个节点、每个自由度的集中力。
   - 支持点击/拖拽框选多选（Shift/Ctrl 追加）后批量施加。
+- 线性多点约束 `u_slave = u_master + offset`，可用于周期性边界条件（RUC）。约束在全局刚度矩阵上消元，两个节点不需要属于同一单元。目前通过 `.fem` 文件添加，GUI 只显示数量、尚未提供编辑和自动配对。
 - 材料参数：杨氏模量 E、泊松比 ν、厚度 t；材料库支持多个材料，单元可以按索引引用不同材料。平面应力 / 平面应变是全局分析设置。
 - 求解后在视口中显示：
   - 变形后的网格（可调放大倍数、可关闭）；
@@ -173,6 +174,50 @@ model.element_materials = MaterialAssignment::PerElement(vec![
 ]);
 ```
 
+周期性边界条件通过 `boundary.links` 写入。每个 link 是一个标量关系
+`u_slave = u_master + offset`；对右边界节点和它在左边界的对应节点，offset
+就是宏观应变乘以节点间距：
+
+```rust
+use fem_types::format::{Boundary, DofLink, DofRef, DofValue};
+
+let exy = 0.5 * gxy; // 工程剪应变 γxy 对应 εxy = γxy / 2
+let boundary = Boundary {
+    prescribed: vec![
+        // 固定平移 gauge：参考点取宏观仿射场在该点的位移
+        DofValue {
+            node: reference,
+            component: 0,
+            value: exx * x_ref + exy * y_ref,
+        },
+        DofValue {
+            node: reference,
+            component: 1,
+            value: exy * x_ref + eyy * y_ref,
+        },
+    ],
+    forces: Vec::new(),
+    links: vec![
+        DofLink {
+            slave: DofRef { node: right, component: 0 },
+            master: DofRef { node: left, component: 0 },
+            // u_slave - u_master = εxx * (x_right - x_left)
+            offset: exx * width,
+        },
+        DofLink {
+            slave: DofRef { node: right, component: 1 },
+            master: DofRef { node: left, component: 1 },
+            offset: exy * width,
+        },
+    ],
+};
+format::write_to_path("ruc.fem", &format::File::from_model(model).with_boundary(boundary))?;
+```
+
+完整 RUC 还要对上下边界做同样的处理（offset 由 `ε̄ · (0, height)` 得到）。求解器会把
+link 和 prescribed 一起做自由度消元；角点上重复的 x/y 周期约束只要 offset 一致就会
+自动合并，不一致会返回 `ConstraintConflict`。
+
 文件布局：
 
 ```text
@@ -184,6 +229,7 @@ model.element_materials = MaterialAssignment::PerElement(vec![
 - `PlaneModel`（平面应力 / 平面应变）是全局分析设置，不属于单个材料；
 - 材料库是 `Vec<Material>`；`MaterialAssignment` 有两种等价表示：`Uniform(MaterialId)` 和 `PerElement(Vec<MaterialId>)`。uniform 变体显式保存材料 id，不使用“空数组代表材料 0”的隐式约定；
 - 边界条件按**节点 + 分量**存储（`0 = Ux, 1 = Uy, 2 = Uz`），不依赖求解器内部的 DOF 编号；
+- 多点约束保存在 `boundary.links` 中，每项是 `u_slave = u_master + offset`。offset 显式保存，因此一个文件对应一个完整载荷工况；周期边界生成器可以按宏观应变重建 offset；
 - 结果按节点/单元顺序保存原始量，von Mises、σz、最大位移在读取时按全局平面假设和逐单元材料重算，避免文件内部自相矛盾；
 - 读取时检查 magic、版本号和负载后的多余字节；版本不匹配会返回 `FormatError::UnsupportedVersion`，不会静默解析出错；
 - 格式仍在早期开发阶段，版本号暂时固定为 **1**，字段还可能变化，不保证旧文件兼容。
@@ -204,6 +250,7 @@ GUI 的“打开…”同时接受 `.fem` 和 `.stl`：`.fem` 会恢复网格、
 - 只支持 2D、3 节点三角形、小变形线弹性静力；
 - 材料目前只有各向同性（`Material::Isotropic`），但 enum 已为各向异性等类型预留扩展点；
 - GUI 可以编辑材料库中的每个材料，但还没有“选择单元并赋予材料”的交互；逐单元分配目前主要来自外部 `.fem` 文件，GUI 会保留并求解；
+- 周期约束目前需要外部程序生成 `.fem` 文件；GUI 还没有边界自动配对、宏观应变加载和均匀化后处理；
 - 无网格生成、无分布载荷、无重力、无接触、无非线性；
 - 打开 `.fem` 时会对网格做拓扑校验，但结果只检查尺寸一致性、不重新求解（避免“以文件为准”和“重算”产生分歧）；
 - 视角为固定 XY 平面，没有 3D 旋转；
@@ -225,6 +272,8 @@ cargo clippy --all-targets
   - 刚体平移零应力、约束不足报错；
   - 悬臂梁位移与竖向反力平衡；
   - 双材料 patch test：不同单元使用各自的 D 矩阵；
+  - 线性约束的链式叠加、一致/冲突环、prescribed 与 link 混合；
+  - 周期边界 patch test（单元应变与宏观应变一致）、均匀 RUC 的 `C_eff = D`、角点 offset 不一致时拒绝；
   - 自带示例 `assets/plate.stl` 的导入与悬臂求解（通过 `fem-import`）；
 - `fem-import`：
   - STL 平面导入、顶点焊接（含跨量化单元边界的焊接）；
@@ -232,7 +281,7 @@ cargo clippy --all-targets
 - `fem-types`：
   - 文件往返、文件头校验（magic / 版本 / 截断 / 尾部字节）；
   - 材料库 / 逐单元分配往返、非法长度和未知 `MaterialId` 的拒绝；
-  - 从文件加载网格后求解、边界条件往返、非法 3D 分量与越界节点的拒绝。
+  - 从文件加载网格后求解、边界条件与多点约束往返、非法 3D 分量与越界节点的拒绝。
 
 GUI 测试覆盖相机平移/缩放方向、屏幕空间框选，以及在存在可用适配器时创建 shader 与两条渲染管线并验证渲染方向；没有 GPU 适配器的环境会自动跳过渲染测试。
 

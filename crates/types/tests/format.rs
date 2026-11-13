@@ -1,6 +1,4 @@
-use fem_types::format::{
-    self, Boundary, DofLink, DofRef, DofValue, File, FormatError, Results,
-};
+use fem_types::format::{self, Boundary, DofLink, DofRef, DofValue, File, FormatError, Results};
 use fem_types::{
     ElemId, ElementStress, Material, MaterialAssignment, MaterialId, Mesh, Model, Node, NodeId,
     PlaneModel, SolveResult, von_mises_stress,

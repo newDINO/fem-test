@@ -90,7 +90,7 @@ impl BoundaryConditions {
         self.prescribed.len()
     }
 
-    pub fn linked_dof_count(&self) -> usize {
+    pub fn link_count(&self) -> usize {
         self.links.len()
     }
 

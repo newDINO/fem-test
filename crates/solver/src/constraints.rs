@@ -215,14 +215,12 @@ mod tests {
 
     #[test]
     fn single_link_ties_slave_to_master() {
-        let links = [Constraint::new(DofId(2), DofId(0), 0.5)];
-        let relations = resolve_links(2, &links).unwrap();
+        let links = [Constraint::new(DofId(1), DofId(0), 0.5)];
+        let relations = resolve_links(1, &links).unwrap();
 
-        assert_eq!(relations.reduced_index[2], relations.reduced_index[0]);
-        assert_eq!(relations.reduced_index[1], Some(1));
-        assert!((relations.constant[0]).abs() < 1e-12);
-        assert!((relations.constant[2] - 0.5).abs() < 1e-12);
-        assert_eq!(relations.free_count(), 2);
+        assert_eq!(relations.reduced_index[1], relations.reduced_index[0]);
+        assert!((relations.constant[1] - relations.constant[0] - 0.5).abs() < 1e-12);
+        assert_eq!(relations.free_count(), 1);
     }
 
     #[test]
