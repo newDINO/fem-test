@@ -9,6 +9,8 @@ pub enum FemError {
     InvalidMaterial(String),
     #[error("not enough constraints: only {count} scalar constraint(s)")]
     InsufficientConstraints { count: usize },
+    #[error("inconsistent linear constraint: {0}")]
+    ConstraintConflict(String),
     #[error("stiffness matrix is singular: {0}")]
     SingularMatrix(String),
     #[error("invalid input: {0}")]

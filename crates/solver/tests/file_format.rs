@@ -3,7 +3,7 @@ use fem_solver::{
     NodeId, PlaneModel, solve,
 };
 use fem_types::Mesh;
-use fem_types::format::{self, Boundary, DofValue, Results};
+use fem_types::format::{self, Boundary, DofLink, DofRef, DofValue, Results};
 
 fn rectangle_mesh(nx: usize, ny: usize, width: f64, height: f64) -> Mesh {
     let mut nodes = Vec::new();
@@ -136,14 +136,17 @@ fn boundary_conditions_roundtrip() {
     bc.set_prescribed(DofId(0), 1.5);
     bc.set_prescribed(DofId(3), 0.0);
     bc.set_force(DofId(5), -2.0);
+    bc.add_link(DofId(7), DofId(1), 0.125);
 
     let boundary = bc.to_file();
     assert_eq!(boundary.prescribed.len(), 2);
     assert_eq!(boundary.forces.len(), 1);
+    assert_eq!(boundary.links.len(), 1);
 
     let restored = BoundaryConditions::from_file(&boundary, 6).unwrap();
     assert_eq!(restored.prescribed, bc.prescribed);
     assert_eq!(restored.forces, bc.forces);
+    assert_eq!(restored.links, bc.links);
 }
 
 #[test]
@@ -155,6 +158,7 @@ fn rejects_out_of_range_boundary_entries() {
             value: 1.0,
         }],
         forces: Vec::new(),
+        links: Vec::new(),
     };
     assert!(matches!(
         BoundaryConditions::from_file(&bad_component, 6).unwrap_err(),
@@ -168,9 +172,30 @@ fn rejects_out_of_range_boundary_entries() {
             component: 0,
             value: 1.0,
         }],
+        links: Vec::new(),
     };
     assert!(matches!(
         BoundaryConditions::from_file(&bad_node, 6).unwrap_err(),
+        FemError::InvalidInput(_)
+    ));
+
+    let bad_link = Boundary {
+        prescribed: Vec::new(),
+        forces: Vec::new(),
+        links: vec![DofLink {
+            slave: DofRef {
+                node: NodeId(99),
+                component: 0,
+            },
+            master: DofRef {
+                node: NodeId(0),
+                component: 0,
+            },
+            offset: 1.0,
+        }],
+    };
+    assert!(matches!(
+        BoundaryConditions::from_file(&bad_link, 6).unwrap_err(),
         FemError::InvalidInput(_)
     ));
 }

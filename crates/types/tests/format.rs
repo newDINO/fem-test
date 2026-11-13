@@ -1,4 +1,6 @@
-use fem_types::format::{self, Boundary, DofValue, File, FormatError, Results};
+use fem_types::format::{
+    self, Boundary, DofLink, DofRef, DofValue, File, FormatError, Results,
+};
 use fem_types::{
     ElemId, ElementStress, Material, MaterialAssignment, MaterialId, Mesh, Model, Node, NodeId,
     PlaneModel, SolveResult, von_mises_stress,
@@ -125,6 +127,17 @@ fn model_roundtrip_keeps_boundary_and_assignment() {
             node: NodeId(2),
             component: 1,
             value: -12.5,
+        }],
+        links: vec![DofLink {
+            slave: DofRef {
+                node: NodeId(2),
+                component: 0,
+            },
+            master: DofRef {
+                node: NodeId(1),
+                component: 0,
+            },
+            offset: 0.25,
         }],
     };
 

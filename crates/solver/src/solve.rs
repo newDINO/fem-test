@@ -30,82 +30,63 @@ pub fn solve(model: &Model, bc: &BoundaryConditions) -> Result<SolveResult, FemE
         }
     }
 
-    let mut prescribed = vec![None; ndof];
-    for (&dof, &value) in &bc.prescribed {
-        if dof.index() >= ndof {
-            return Err(FemError::InvalidInput(
-                "boundary condition references a DOF outside the mesh".to_owned(),
-            ));
+    if bc.prescribed.is_empty() && bc.links.is_empty() {
+        return Err(FemError::InsufficientConstraints { count: 0 });
+    }
+
+    // Prescribed displacements are links to a virtual ground DOF, so both
+    // fixed and periodic DOFs go through the same reduction path.
+    let relations = crate::constraints::resolve(dof_map, &bc.prescribed, &bc.links)?;
+    let free_count = relations.free_count();
+
+    let mut reduced_rhs = vec![0.0; free_count];
+    for i in 0..ndof {
+        if let Some(ri) = relations.reduced_index[i] {
+            reduced_rhs[ri] += external_force[i];
         }
-        if !value.is_finite() {
-            return Err(FemError::InvalidInput(
-                "prescribed displacement contains a non-finite value".to_owned(),
-            ));
-        }
-        prescribed[dof.index()] = Some(value);
-    }
-
-    let constrained_count = prescribed.iter().filter(|v| v.is_some()).count();
-    if constrained_count < 3 {
-        return Err(FemError::InsufficientConstraints {
-            count: constrained_count,
-        });
-    }
-
-    let free_dofs: Vec<usize> = (0..ndof).filter(|&i| prescribed[i].is_none()).collect();
-    let mut free_index = vec![None; ndof];
-    for (free_i, &global_i) in free_dofs.iter().enumerate() {
-        free_index[global_i] = Some(free_i);
-    }
-
-    let mut reduced_rhs = vec![0.0; free_dofs.len()];
-    for (free_i, &global_i) in free_dofs.iter().enumerate() {
-        reduced_rhs[free_i] = external_force[global_i];
     }
 
     let mut reduced_triplets = Vec::with_capacity(assembly.triplets.len());
     for entry in &assembly.triplets {
         let (i, j, value) = (entry.row, entry.col, entry.val);
-        match (free_index[i], free_index[j]) {
-            (Some(ri), Some(rj)) => {
-                reduced_triplets.push(Triplet::new(ri, rj, value));
-            }
-            (Some(ri), None) => {
-                // K_fc * u_c moves to the right-hand side.
-                reduced_rhs[ri] -= value * prescribed[j].unwrap();
-            }
-            _ => {}
+
+        // Only rows that survive the transformation contribute. The constant
+        // part of u_j (prescribed value or periodic offset) moves to the RHS.
+        let Some(ri) = relations.reduced_index[i] else {
+            continue;
+        };
+        if let Some(rj) = relations.reduced_index[j] {
+            reduced_triplets.push(Triplet::new(ri, rj, value));
         }
+        reduced_rhs[ri] -= value * relations.constant[j];
     }
 
-    let mut displacement = vec![0.0; ndof];
-    for i in 0..ndof {
-        if let Some(value) = prescribed[i] {
-            displacement[i] = value;
-        }
-    }
+    let mut displacement = relations.constant.clone();
 
-    if !free_dofs.is_empty() {
-        let nfree = free_dofs.len();
+    if free_count > 0 {
         let reduced =
-            SparseColMat::<usize, f64>::try_new_from_triplets(nfree, nfree, &reduced_triplets)
+            SparseColMat::<usize, f64>::try_new_from_triplets(free_count, free_count, &reduced_triplets)
                 .map_err(|e| FemError::SingularMatrix(format!("{e:?}")))?;
 
-        let lu = reduced
-            .sp_lu()
-            .map_err(|e| FemError::SingularMatrix(format!("{e:?}")))?;
+        let lu = reduced.sp_lu().map_err(|e| {
+            FemError::SingularMatrix(format!(
+                "{e:?}; the model may have unconstrained rigid-body modes or a mechanism"
+            ))
+        })?;
 
-        let rhs = faer::Mat::<f64>::from_fn(nfree, 1, |i, _| reduced_rhs[i]);
+        let rhs = faer::Mat::<f64>::from_fn(free_count, 1, |i, _| reduced_rhs[i]);
         let solution = lu.solve(rhs);
 
-        for (free_i, &global_i) in free_dofs.iter().enumerate() {
-            let value = solution[(free_i, 0)];
-            if !value.is_finite() {
-                return Err(FemError::SingularMatrix(
-                    "solution contains a non-finite value".to_owned(),
-                ));
+        for i in 0..ndof {
+            if let Some(ri) = relations.reduced_index[i] {
+                let value = solution[(ri, 0)];
+                if !value.is_finite() {
+                    return Err(FemError::SingularMatrix(
+                        "solution contains a non-finite value".to_owned(),
+                    ));
+                }
+                displacement[i] = value + relations.constant[i];
             }
-            displacement[global_i] = value;
         }
     }
 
@@ -119,7 +100,10 @@ pub fn solve(model: &Model, bc: &BoundaryConditions) -> Result<SolveResult, FemE
         reactions[i] -= external_force[i];
     }
 
-    let max_residual = free_dofs
+    // Check equilibrium on the independent (master) DOFs only. Slave and fixed
+    // rows carry constraint reactions and are intentionally not zero.
+    let max_residual = relations
+        .masters
         .iter()
         .map(|&i| reactions[i].abs())
         .fold(0.0_f64, f64::max);

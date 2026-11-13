@@ -1,5 +1,6 @@
 pub mod assemble;
 pub mod bc;
+pub mod constraints;
 pub mod dof;
 pub mod element;
 pub mod error;
@@ -8,7 +9,8 @@ pub mod mesh;
 pub mod result;
 pub mod solve;
 
-pub use bc::BoundaryConditions;
+pub use bc::{BoundaryConditions, Constraint};
+pub use constraints::{DofRelations, resolve as resolve_constraints};
 pub use dof::{DofId, DofMap};
 pub use error::FemError;
 pub use fem_types;

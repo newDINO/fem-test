@@ -139,12 +139,36 @@ pub struct DofValue {
     pub value: f64,
 }
 
+/// One scalar degree of freedom, addressed by node and component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DofRef {
+    pub node: NodeId,
+    pub component: u8,
+}
+
+/// A linear multi-point constraint `u_slave = u_master + offset`.
+///
+/// Periodic boundary conditions are a special case: for small strains the
+/// offset between a node and its image under a lattice vector `a` is
+/// `offset = macro_strain * a`. The offset is stored explicitly so that the
+/// file describes one complete load case; a generator can recompute it for a
+/// different macro strain.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DofLink {
+    pub slave: DofRef,
+    pub master: DofRef,
+    pub offset: f64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Boundary {
     #[serde(default)]
     pub prescribed: Vec<DofValue>,
     #[serde(default)]
     pub forces: Vec<DofValue>,
+    /// Multi-point constraints, for example periodic boundary conditions.
+    #[serde(default)]
+    pub links: Vec<DofLink>,
 }
 
 /// Node-major and element-major arrays. Derived values such as von Mises
