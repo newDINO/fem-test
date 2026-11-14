@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/types", "crates/import", "crates/solver", "crates/gui"]
+members = ["crates/types", "crates/import", "crates/solver", "crates/gui", "crates/web"]
+default-members = ["crates/types", "crates/import", "crates/solver", "crates/gui"]
 resolver = "3"
 
 [profile.dev]

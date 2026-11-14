@@ -1,12 +1,14 @@
-mod app;
-mod camera;
-mod picking;
-mod renderer;
+#[cfg(target_family = "wasm")]
+fn main() {
+    // The web build is started from the `fem-web` crate; this binary target
+    // only exists so that the GUI crate can be built for every target.
+}
 
-use app::FemApp;
-use eframe::egui;
-
+#[cfg(not(target_family = "wasm"))]
 fn main() -> eframe::Result<()> {
+    use eframe::egui;
+    use fem_gui::app::FemApp;
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])

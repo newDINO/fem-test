@@ -9,7 +9,9 @@ use thiserror::Error;
 
 pub mod stl;
 
-pub use stl::{DropAxis, ImportReport, StlImportOptions, import_stl_mesh, load_stl};
+#[cfg(not(target_family = "wasm"))]
+pub use stl::load_stl;
+pub use stl::{DropAxis, ImportReport, StlImportOptions, import_stl_mesh, load_stl_bytes};
 
 #[derive(Debug, Error)]
 pub enum ImportError {

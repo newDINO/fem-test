@@ -40,6 +40,14 @@ fn encode(file: &File) -> Vec<u8> {
 }
 
 #[test]
+fn to_bytes_matches_the_writer_api() {
+    let file = triangle_file();
+    let bytes = format::to_bytes(&file).unwrap();
+    assert_eq!(bytes, encode(&file));
+    assert_eq!(format::read_bytes(&bytes).unwrap(), file);
+}
+
+#[test]
 fn mesh_roundtrip_has_header() {
     let file = triangle_file();
     let bytes = encode(&file);

@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_family = "wasm"))]
 use std::fs::File;
+use std::io::Cursor;
+#[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 
 use stl_io::IndexedMesh;
@@ -80,6 +83,7 @@ pub struct ImportReport {
     pub weld_tolerance: f64,
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn load_stl(
     path: impl AsRef<Path>,
     options: StlImportOptions,
@@ -89,6 +93,18 @@ pub fn load_stl(
         .map_err(|e| ImportError::Stl(format!("cannot open {}: {e}", path.display())))?;
     let stl = stl_io::read_stl(&mut file)
         .map_err(|e| ImportError::Stl(format!("cannot parse {}: {e}", path.display())))?;
+    import_stl_mesh(&stl, options)
+}
+
+/// Parse an STL that is already in memory. This is the entry point used by the
+/// web build, where there is no filesystem path for an uploaded file.
+pub fn load_stl_bytes(
+    bytes: &[u8],
+    options: StlImportOptions,
+) -> Result<(Mesh, ImportReport), ImportError> {
+    let mut cursor = Cursor::new(bytes);
+    let stl = stl_io::read_stl(&mut cursor)
+        .map_err(|e| ImportError::Stl(format!("cannot parse STL data: {e}")))?;
     import_stl_mesh(&stl, options)
 }
 

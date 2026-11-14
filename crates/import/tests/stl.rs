@@ -41,6 +41,23 @@ fn imports_planar_stl_and_welds_vertices() {
 }
 
 #[test]
+fn loads_stl_from_memory() {
+    let bytes = ascii_stl(&square_faces(), "plate");
+    let (mesh, report) = fem_import::load_stl_bytes(
+        &bytes,
+        StlImportOptions {
+            drop_axis: DropAxis::Z,
+            weld_tolerance: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(mesh.nodes.len(), 4);
+    assert_eq!(mesh.triangles.len(), 2);
+    assert_eq!(report.imported_triangles, 2);
+}
+
+#[test]
 fn rejects_non_planar_stl() {
     let faces = [
         ([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 5.0, 0.0]),

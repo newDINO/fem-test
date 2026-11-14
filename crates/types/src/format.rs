@@ -18,6 +18,7 @@
 //! while fields change, and only stable formats will get migration code.
 
 use std::io::{Read, Write};
+#[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -290,12 +291,19 @@ pub enum FormatError {
     InvalidResult(String),
 }
 
+/// Serialize to a new byte vector.
+pub fn to_bytes(file: &File) -> Result<Vec<u8>, FormatError> {
+    let payload = rmp_serde::to_vec_named(file)?;
+    let mut bytes = Vec::with_capacity(HEADER_LEN + payload.len());
+    bytes.extend_from_slice(&MAGIC);
+    bytes.extend_from_slice(&VERSION.to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    Ok(bytes)
+}
+
 /// Serialize to any writer.
 pub fn write<W: Write>(mut writer: W, file: &File) -> Result<(), FormatError> {
-    let payload = rmp_serde::to_vec_named(file)?;
-    writer.write_all(&MAGIC)?;
-    writer.write_all(&VERSION.to_le_bytes())?;
-    writer.write_all(&payload)?;
+    writer.write_all(&to_bytes(file)?)?;
     Ok(())
 }
 
@@ -334,22 +342,31 @@ pub fn read_bytes(bytes: &[u8]) -> Result<File, FormatError> {
     Ok(file)
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn read_from_path(path: impl AsRef<Path>) -> Result<File, FormatError> {
     read(std::fs::File::open(path)?)
 }
 
-/// Write through a temporary file so that a crash cannot leave a half-written
-/// project behind.
-pub fn write_to_path(path: impl AsRef<Path>, file: &File) -> Result<(), FormatError> {
+/// Write pre-serialized bytes through a temporary file so that a crash cannot
+/// leave a half-written project behind.
+#[cfg(not(target_family = "wasm"))]
+pub fn write_bytes_to_path(path: impl AsRef<Path>, bytes: &[u8]) -> Result<(), FormatError> {
     let path = path.as_ref();
     let temporary = path.with_extension("fem.tmp");
 
     {
         let mut handle = std::fs::File::create(&temporary)?;
-        write(&mut handle, file)?;
+        handle.write_all(bytes)?;
         handle.flush()?;
     }
 
     std::fs::rename(&temporary, path)?;
     Ok(())
+}
+
+/// Write through a temporary file so that a crash cannot leave a half-written
+/// project behind.
+#[cfg(not(target_family = "wasm"))]
+pub fn write_to_path(path: impl AsRef<Path>, file: &File) -> Result<(), FormatError> {
+    write_bytes_to_path(path, &to_bytes(file)?)
 }

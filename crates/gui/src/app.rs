@@ -1,19 +1,18 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use eframe::egui;
 use eframe::egui_wgpu;
-use fem_import::{DropAxis, ImportReport, StlImportOptions, load_stl};
+use fem_import::{DropAxis, ImportReport, StlImportOptions, load_stl_bytes};
 use fem_solver::{
     BoundaryConditions, Material, MaterialAssignment, MaterialExt, MaterialId, Mesh, Model, NodeId,
     PlaneModel, SolveResult, solve,
 };
 use fem_types::format::{self, File as ProjectFile, Results};
-use rfd::FileDialog;
 
 use crate::camera::Camera2d;
 use crate::picking::{pick_node, pick_nodes_in_rect};
+use crate::platform::{self, FileRef, TaskOutcome};
 use crate::renderer::{RenderData, ViewportCallback, ViewportGpu, build_render_data};
 
 fn plane_model_label(model: PlaneModel) -> &'static str {
@@ -32,24 +31,11 @@ fn material_assignment_label(assignment: &MaterialAssignment) -> String {
     }
 }
 
-/// Force a `.fem` extension without clobbering a name that already has one.
-fn ensure_fem_extension(path: &Path) -> PathBuf {
-    let has_fem_extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("fem"));
-    if has_fem_extension {
-        path.to_path_buf()
-    } else {
-        path.with_extension("fem")
-    }
-}
-
 pub struct FemApp {
     drop_axis: DropAxis,
-    stl_source: Option<PathBuf>,
-    project_path: Option<PathBuf>,
-    last_directory: Option<PathBuf>,
+    stl_source: Option<FileRef>,
+    project: Option<FileRef>,
+    file_task: Option<platform::FileTask>,
     mesh: Option<Mesh>,
     report: Option<ImportReport>,
     plane_model: PlaneModel,
@@ -90,8 +76,8 @@ impl FemApp {
         let mut app = Self {
             drop_axis: DropAxis::Z,
             stl_source: None,
-            project_path: None,
-            last_directory: None,
+            project: None,
+            file_task: None,
             mesh: None,
             report: None,
             plane_model: PlaneModel::PlaneStress,
@@ -120,95 +106,133 @@ impl FemApp {
             edit_fy: 0.0,
         };
 
-        if Path::new("assets/plate.stl").exists() {
-            app.load_stl_path(Path::new("assets/plate.stl"));
-        }
+        // Embed the sample so the web build can start without a filesystem.
+        const SAMPLE_STL: &[u8] = include_bytes!("../../../assets/plate.stl");
+        let source = FileRef::embedded("plate.stl", SAMPLE_STL);
+        app.load_stl_source(source, SAMPLE_STL);
         app
     }
 
-    fn open_dialog(&mut self) {
-        let mut dialog = FileDialog::new()
-            .add_filter("FEM 项目 / STL 网格", &["fem", "stl"])
-            .add_filter("FEM 项目", &["fem"])
-            .add_filter("STL 网格", &["stl"]);
-        if let Some(directory) = &self.last_directory {
-            dialog = dialog.set_directory(directory);
-        }
-        if let Some(path) = dialog.pick_file() {
-            self.open_path(path);
+    fn start_file_task(&mut self, task: platform::FileTask) {
+        self.file_task = Some(task);
+        self.poll_file_task();
+    }
+
+    fn poll_file_task(&mut self) {
+        let Some(outcome) = self.file_task.as_mut().and_then(|task| task.poll()) else {
+            return;
+        };
+        self.file_task = None;
+
+        match outcome {
+            TaskOutcome::Opened { file, bytes } => self.open_file(file, &bytes),
+            TaskOutcome::Saved { file } => {
+                self.project = Some(file.clone());
+                self.error = None;
+                self.status = format!("已保存到 {}", file.display());
+            }
+            TaskOutcome::Cancelled => {
+                self.status = "已取消文件操作".to_owned();
+            }
+            TaskOutcome::Failed(message) => {
+                self.error = Some(message);
+                self.status = "文件操作失败".to_owned();
+            }
         }
     }
 
-    fn save(&mut self) {
+    fn open_dialog(&mut self, ctx: &egui::Context) {
+        if self.file_task.is_some() {
+            self.status = "请等待当前文件任务完成".to_owned();
+            return;
+        }
+        self.error = None;
+        self.status = "正在打开文件…".to_owned();
+        let task = platform::open(ctx);
+        self.start_file_task(task);
+    }
+
+    fn save(&mut self, ctx: &egui::Context, save_as: bool) {
         if self.mesh.is_none() {
             self.error = Some("没有可保存的网格".to_owned());
             return;
         }
-        match self.project_path.clone() {
-            Some(path) => self.save_to_path(&path),
-            None => self.save_dialog(),
-        }
-    }
-
-    fn save_dialog(&mut self) {
-        if self.mesh.is_none() {
-            self.error = Some("没有可保存的网格".to_owned());
+        if self.file_task.is_some() {
+            self.status = "请等待当前文件任务完成".to_owned();
             return;
         }
 
-        let mut dialog = FileDialog::new()
-            .add_filter("FEM 项目", &["fem"])
-            .set_file_name(self.suggested_file_name());
-        if let Some(directory) = &self.last_directory {
-            dialog = dialog.set_directory(directory);
+        let Some(model) = self.build_model() else {
+            self.error = Some("没有可保存的网格".to_owned());
+            return;
+        };
+        let mut file = ProjectFile::from_model(model).with_boundary(self.bc.to_file());
+        if let Some(result) = &self.result {
+            file = file.with_results(Results::from_solve(result));
         }
-        if let Some(path) = dialog.save_file() {
-            self.save_to_path(&path);
-        }
+
+        let bytes = match format::to_bytes(&file) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                self.status = "保存失败".to_owned();
+                return;
+            }
+        };
+
+        self.error = None;
+        self.status = "正在保存…".to_owned();
+        let task = platform::save(
+            ctx,
+            self.project.as_ref(),
+            save_as,
+            self.suggested_file_name(),
+            bytes,
+        );
+        self.start_file_task(task);
     }
 
     fn suggested_file_name(&self) -> String {
-        if let Some(path) = &self.project_path
-            && let Some(name) = path.file_name()
-        {
-            return name.to_string_lossy().into_owned();
+        if let Some(project) = &self.project {
+            return project.name().to_owned();
         }
-        if let Some(path) = &self.stl_source
-            && let Some(stem) = path.file_stem()
-        {
-            return format!("{}.fem", stem.to_string_lossy());
+        if let Some(source) = &self.stl_source {
+            let name = source.name();
+            let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+            return format!("{stem}.fem");
         }
         "project.fem".to_owned()
     }
 
-    fn open_path(&mut self, path: PathBuf) {
-        let extension = path
+    fn open_file(&mut self, file: FileRef, bytes: &[u8]) {
+        let extension = std::path::Path::new(file.name())
             .extension()
             .and_then(|value| value.to_str())
             .map(|value| value.to_ascii_lowercase());
 
         match extension.as_deref() {
-            Some("fem") => self.load_fem(&path),
-            Some("stl") => self.load_stl_path(&path),
+            Some("fem") => self.load_fem(file, bytes),
+            Some("stl") => self.load_stl_source(file, bytes),
             _ => {
                 self.error = Some(format!(
                     "无法识别 {}：请选择 .fem 项目或 .stl 网格",
-                    path.display()
+                    file.display()
                 ));
                 self.status = "未加载文件".to_owned();
             }
         }
     }
 
-    fn load_stl_path(&mut self, path: &Path) {
+    fn load_stl_source(&mut self, source: FileRef, bytes: &[u8]) {
         let options = StlImportOptions {
             drop_axis: self.drop_axis,
             weld_tolerance: None,
         };
-        match load_stl(path, options) {
+        match load_stl_bytes(bytes, options) {
             Ok((mesh, report)) => {
                 let node_count = mesh.nodes.len();
                 let triangle_count = mesh.triangles.len();
+                let display = source.display();
                 self.mesh = Some(mesh);
                 self.report = Some(report);
                 self.ensure_material_library();
@@ -217,14 +241,11 @@ impl FemApp {
                 self.result = None;
                 self.selection.clear();
                 self.needs_fit = true;
-                self.stl_source = Some(path.to_path_buf());
-                self.project_path = None;
-                self.last_directory = path.parent().map(Path::to_path_buf);
+                self.stl_source = Some(source);
+                self.project = None;
                 self.error = None;
-                self.status = format!(
-                    "已从 {} 加载 {node_count} 个节点、{triangle_count} 个三角形",
-                    path.display()
-                );
+                self.status =
+                    format!("已从 {display} 加载 {node_count} 个节点、{triangle_count} 个三角形");
                 self.sync_editor_from_selection();
                 self.mark_dirty();
             }
@@ -236,19 +257,28 @@ impl FemApp {
     }
 
     fn reload_stl(&mut self) {
-        if let Some(path) = self.stl_source.clone() {
+        if let Some(source) = self.stl_source.clone() {
             // Re-importing rebuilds the mesh, but the user may have already
             // saved this model as a project; keep Ctrl+S pointing at that file.
-            let project_path = self.project_path.clone();
-            self.load_stl_path(&path);
-            if self.error.is_none() {
-                self.project_path = project_path;
+            let project = self.project.clone();
+            match source.read() {
+                Ok(bytes) => {
+                    self.load_stl_source(source, &bytes);
+                    if self.error.is_none() {
+                        self.project = project;
+                    }
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    self.status = "STL 重新读取失败".to_owned();
+                }
             }
         }
     }
 
-    fn load_fem(&mut self, path: &Path) {
-        let file = match format::read_from_path(path) {
+    fn load_fem(&mut self, source: FileRef, bytes: &[u8]) {
+        let display = source.display();
+        let file = match format::read_bytes(bytes) {
             Ok(file) => file,
             Err(error) => {
                 self.error = Some(error.to_string());
@@ -328,8 +358,7 @@ impl FemApp {
         self.selection.clear();
         self.needs_fit = true;
         self.stl_source = None;
-        self.project_path = Some(path.to_path_buf());
-        self.last_directory = path.parent().map(Path::to_path_buf);
+        self.project = Some(source);
         if let Some(scale) = deformation_scale {
             self.deformation_scale = scale;
         }
@@ -337,42 +366,14 @@ impl FemApp {
         self.error = None;
         self.status = match &self.result {
             Some(_) => format!(
-                "已打开 {}：{node_count} 个节点、{triangle_count} 个三角形（含结果）",
-                path.display()
+                "已打开 {display}：{node_count} 个节点、{triangle_count} 个三角形（含结果）"
             ),
-            None => format!(
-                "已打开 {}：{node_count} 个节点、{triangle_count} 个三角形",
-                path.display()
-            ),
+            None => {
+                format!("已打开 {display}：{node_count} 个节点、{triangle_count} 个三角形")
+            }
         };
         self.sync_editor_from_selection();
         self.mark_dirty();
-    }
-
-    fn save_to_path(&mut self, path: &Path) {
-        let Some(model) = self.build_model() else {
-            self.error = Some("没有可保存的网格".to_owned());
-            return;
-        };
-
-        let path = ensure_fem_extension(path);
-        let mut file = ProjectFile::from_model(model).with_boundary(self.bc.to_file());
-        if let Some(result) = &self.result {
-            file = file.with_results(Results::from_solve(result));
-        }
-
-        match format::write_to_path(&path, &file) {
-            Ok(()) => {
-                self.project_path = Some(path.clone());
-                self.last_directory = path.parent().map(Path::to_path_buf);
-                self.error = None;
-                self.status = format!("已保存到 {}", path.display());
-            }
-            Err(error) => {
-                self.error = Some(error.to_string());
-                self.status = "保存失败".to_owned();
-            }
-        }
     }
 
     fn build_model(&self) -> Option<Model> {
@@ -570,28 +571,29 @@ impl FemApp {
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
+        let busy = self.file_task.is_some();
+        let has_mesh = self.mesh.is_some();
         ui.heading("文件");
         ui.horizontal(|ui| {
-            if ui.button("打开…").clicked() {
-                self.open_dialog();
-            }
-            let has_mesh = self.mesh.is_some();
-            if ui
-                .add_enabled(has_mesh, egui::Button::new("保存"))
-                .clicked()
-            {
-                self.save();
+            if ui.add_enabled(!busy, egui::Button::new("打开…")).clicked() {
+                self.open_dialog(ui.ctx());
             }
             if ui
-                .add_enabled(has_mesh, egui::Button::new("另存为…"))
+                .add_enabled(has_mesh && !busy, egui::Button::new("保存"))
                 .clicked()
             {
-                self.save_dialog();
+                self.save(ui.ctx(), false);
+            }
+            if ui
+                .add_enabled(has_mesh && !busy, egui::Button::new("另存为…"))
+                .clicked()
+            {
+                self.save(ui.ctx(), true);
             }
         });
-        let current = match (&self.project_path, &self.stl_source) {
-            (Some(path), _) => format!("当前项目：{}", path.display()),
-            (None, Some(path)) => format!("当前网格（未保存）：{}", path.display()),
+        let current = match (&self.project, &self.stl_source) {
+            (Some(file), _) => format!("当前项目：{}", file.display()),
+            (None, Some(file)) => format!("当前网格（未保存）：{}", file.display()),
             (None, None) => "当前没有打开文件".to_owned(),
         };
         ui.small(current);
@@ -951,14 +953,18 @@ impl FemApp {
 
 impl eframe::App for FemApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let dropped = ui.ctx().input(|i| {
-            i.raw
-                .dropped_files
-                .first()
-                .map(|file| file.path().to_path_buf())
-        });
-        if let Some(path) = dropped {
-            self.open_path(path);
+        self.poll_file_task();
+
+        let dropped = ui.ctx().input(|i| i.raw.dropped_files.first().cloned());
+        if let Some(file) = dropped {
+            if self.file_task.is_none() {
+                self.error = None;
+                self.status = "正在读取拖入的文件…".to_owned();
+                let task = platform::open_dropped(ui.ctx(), file);
+                self.start_file_task(task);
+            } else {
+                self.status = "请等待当前文件任务完成".to_owned();
+            }
         }
 
         let (open_shortcut, save_shortcut) = ui.ctx().input(|i| {
@@ -968,10 +974,10 @@ impl eframe::App for FemApp {
             )
         });
         if open_shortcut {
-            self.open_dialog();
+            self.open_dialog(ui.ctx());
         }
         if save_shortcut {
-            self.save();
+            self.save(ui.ctx(), false);
         }
 
         egui::Panel::top("top").show(ui, |ui| {
@@ -1014,6 +1020,9 @@ impl eframe::App for FemApp {
                 } else {
                     ui.label(&self.status);
                 }
+                if self.file_task.is_some() {
+                    ui.spinner();
+                }
             });
         });
 
@@ -1029,27 +1038,12 @@ impl eframe::App for FemApp {
         egui::CentralPanel::default().show(ui, |ui| {
             self.viewport_ui(ui);
         });
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::ensure_fem_extension;
-    use std::path::Path;
-
-    #[test]
-    fn saved_projects_always_use_the_fem_extension() {
-        assert_eq!(
-            ensure_fem_extension(Path::new("plate")),
-            Path::new("plate.fem")
-        );
-        assert_eq!(
-            ensure_fem_extension(Path::new("plate.stl")),
-            Path::new("plate.fem")
-        );
-        assert_eq!(
-            ensure_fem_extension(Path::new("plate.FEM")),
-            Path::new("plate.FEM")
-        );
+        // egui only repaints on input by default. A pending web task (file
+        // picker or download) completes outside of egui, so keep polling it.
+        if self.file_task.is_some() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 }

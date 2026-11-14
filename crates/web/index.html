@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FEM 2D Web Demo</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #14181d;
+      color: #d8dee6;
+      font-family: system-ui, sans-serif;
+    }
+    #fem_canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      outline: none;
+    }
+    #fatal {
+      white-space: pre-wrap;
+      padding: 24px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="fem_canvas" tabindex="0"></canvas>
+  <script type="module">
+    import init, { WebHandle } from './pkg/fem_web.js';
+
+    async function main() {
+      await init();
+      const handle = new WebHandle();
+      // Keep the handle alive for the lifetime of the page.
+      window.femApp = handle;
+      await handle.start(document.getElementById('fem_canvas'));
+    }
+
+    main().catch((error) => {
+      console.error(error);
+      document.body.innerHTML =
+        '<pre id="fatal">启动失败：' + error +
+        '\n\n这个演示使用 wgpu，需要支持 WebGPU 的浏览器' +
+        '（Chrome/Edge 113+，或启用了 WebGPU 的 Firefox/Safari）。' +
+        '\n请通过 HTTP 服务器打开页面，而不是直接双击 index.html。</pre>';
+    });
+  </script>
+</body>
+</html>
